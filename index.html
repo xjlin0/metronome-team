@@ -1,235 +1,81 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html>
 <head>
   <meta charset="UTF-8">
-  <title>同步節拍器 MVP</title>
+  <title>Metronome Sync Demo</title>
   <style>
-    body { text-align:center; font-family:sans-serif; }
-    #beatCircle {
-      width:150px; height:150px; border-radius:50%;
-      background:#ccc; margin:20px auto; transition:background 0.1s;
-    }
-    #controls { margin:20px; }
-    #debug { text-align:left; font-size:14px; margin:20px auto; background:#eee; padding:10px; width:300px; }
-    video { width:300px; margin:10px; }
-    #qr { margin:20px; }
+    body { font-family: sans-serif; text-align: center; }
+    #circle { width: 150px; height: 150px; border-radius: 50%; background: lightblue; margin: 50px auto; }
   </style>
 </head>
 <body>
-  <h1>同步節拍器 MVP</h1>
-
-  <div id="beatCircle"></div>
-
-  <div id="controls">
-    <label>BPM:
-      <input type="range" id="bpmSlider" min="40" max="240" value="120">
-      <span id="bpmDisplay">120</span>
-    </label>
-    <br>
-    <label>拍/小節:
-      <select id="beatsPerBar">
-        <option value="0">0 (無強拍)</option>
-        <option value="2">2</option>
-        <option value="3">3</option>
-        <option value="4" selected>4</option>
-      </select>
-    </label>
-    <br><br>
-    <button id="startBtn">開始</button>
-    <button id="stopBtn">停止</button>
-    <br><br>
-    <button id="beLeader">成為 Leader</button>
-    <button id="beFollower">加入 Leader</button>
-    <button id="cancelRole" style="display:none;">取消</button>
-  </div>
-
-  <div id="qr"></div>
-  <div id="cameraUI" style="display:none;">
-    <video id="video" autoplay></video><br>
-    <button id="stopScan">停止掃描</button>
-  </div>
-
-  <div id="debug">
-    <b>Debug Info</b><br>
-    本機時間: <span id="dbgTime"></span><br>
-    BPM: <span id="dbgBpm"></span><br>
-    拍/小節: <span id="dbgBar"></span><br>
-    當前拍號: <span id="dbgBeat"></span><br>
-    Leader StartAt: <span id="dbgStartAt"></span><br>
-    Leader Offset(ms): <span id="dbgOffset"></span><br>
-  </div>
-
-  <!-- JS libraries -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-  <script src="https://unpkg.com/jsqr/dist/jsQR.js"></script>
+  <h1>Metronome Sync Demo</h1>
+  <div id="circle"></div>
+  <p id="tempo">Tempo: --</p>
+  <button id="be-leader">Start as Leader</button>
+  <button id="join">Join as Follower</button>
 
   <script>
-    let bpm = 120, beatsPerBar = 4;
-    let interval, timer, currentBeat = 0;
-    let audioCtx, tickHigh, tickLow;
-    let leader = false, follower = false;
-    let startAt = null; // Leader start timestamp
-    let offset = 0;
+    let tempo = 100;
+    let isLeader = false;
+    let peer, channel;
+    let interval;
 
-    const bpmSlider = document.getElementById("bpmSlider");
-    const bpmDisplay = document.getElementById("bpmDisplay");
-    const beatsPerBarSel = document.getElementById("beatsPerBar");
-    const beatCircle = document.getElementById("beatCircle");
-
-    bpmSlider.oninput = () => { bpm = parseInt(bpmSlider.value); bpmDisplay.textContent = bpm; updateAll(); };
-    beatsPerBarSel.onchange = () => { beatsPerBar = parseInt(beatsPerBarSel.value); updateAll(); };
-
-    function initAudio() {
-      if(!audioCtx) {
-        audioCtx = new (window.AudioContext||window.webkitAudioContext)();
-        tickHigh = createTick(1000); // 高音
-        tickLow = createTick(600);   // 低音
-      }
-    }
-
-    function createTick(freq){
-      return function(){
-        let osc = audioCtx.createOscillator();
-        let gain = audioCtx.createGain();
-        osc.frequency.value = freq;
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        gain.gain.setValueAtTime(1, audioCtx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.05);
-        osc.start(audioCtx.currentTime);
-        osc.stop(audioCtx.currentTime + 0.05);
-      };
-    }
-
-    function playClick(accent){ if(accent) tickHigh(); else tickLow(); }
-    function drawBeat(on){
-      beatCircle.style.background = on ? "#0f0" : "#ccc";
-    }
-
-    function startMetronome(refTime=null){
-      stopMetronome();
-      initAudio();
-      currentBeat = 0;
-      let intervalMs = 60000/bpm;
-
-      if(refTime){
-        let now = Date.now();
-        let delta = now - refTime;
-        let beatsSince = Math.floor(delta/intervalMs);
-        currentBeat = beatsSince % (beatsPerBar || 1000);
-      }
-
-      timer = setInterval(()=>{
-        let accent = (beatsPerBar>0 && currentBeat%beatsPerBar===0);
-        playClick(accent);
-        drawBeat(true);
-        setTimeout(()=>drawBeat(false), intervalMs/2);
-        currentBeat++;
-        updateDebug();
-      }, intervalMs);
-    }
-
-    function stopMetronome(){
-      if(timer) clearInterval(timer);
-      timer = null;
-      currentBeat = 0;
-    }
-
-    function updateAll(){
-      if(leader){
-        generateQR();
-      }
-    }
-
-    function updateDebug(){
-      document.getElementById("dbgTime").textContent = Date.now();
-      document.getElementById("dbgBpm").textContent = bpm;
-      document.getElementById("dbgBar").textContent = beatsPerBar;
-      document.getElementById("dbgBeat").textContent = currentBeat;
-      document.getElementById("dbgStartAt").textContent = startAt;
-      document.getElementById("dbgOffset").textContent = offset;
-    }
-
-    // Leader
-    document.getElementById("beLeader").onclick = ()=>{
-      leader = true; follower = false;
-      startAt = Date.now()+2000; // 2秒後起拍
-      generateQR();
-      document.getElementById("cancelRole").style.display="inline";
-      startMetronome(startAt);
-    };
-
-    function generateQR(){
-      document.getElementById("qr").innerHTML="";
-      let payload = { bpm, beatsPerBar, startAt };
-      new QRCode(document.getElementById("qr"), JSON.stringify(payload));
-    }
-
-    // Follower
-    document.getElementById("beFollower").onclick = ()=>{
-      follower = true; leader = false;
-      startCameraScan();
-      document.getElementById("cancelRole").style.display="inline";
-    };
-
-    function startCameraScan(){
-      document.getElementById("cameraUI").style.display="block";
-      const video = document.getElementById("video");
-      navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}})
-        .then(stream=>{
-          video.srcObject=stream;
-          const canvas=document.createElement("canvas");
-          const ctx=canvas.getContext("2d");
-          const scan=()=>{
-            if(video.readyState===video.HAVE_ENOUGH_DATA){
-              canvas.width=video.videoWidth;
-              canvas.height=video.videoHeight;
-              ctx.drawImage(video,0,0,canvas.width,canvas.height);
-              const img=ctx.getImageData(0,0,canvas.width,canvas.height);
-              const code=jsQR(img.data,canvas.width,canvas.height);
-              if(code){
-                joinLeader(code.data);
-                stopScan();
-                return;
-              }
-            }
-            requestAnimationFrame(scan);
-          };
-          scan();
+    async function timeSync() {
+      let samples = [];
+      for (let i=0; i<5; i++) {
+        const t0 = Date.now();
+        const res = await fetch("/api/timesync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clientTime: t0 }),
         });
-    }
-
-    function stopScan(){
-      document.getElementById("cameraUI").style.display="none";
-      let v=document.getElementById("video");
-      if(v.srcObject){
-        v.srcObject.getTracks().forEach(t=>t.stop());
+        const { clientTime, serverTime } = await res.json();
+        const t1 = Date.now();
+        const rtt = t1 - clientTime;
+        const oneWay = rtt/2;
+        const offset = (serverTime + oneWay) - t1;
+        samples.push(offset);
       }
+      samples.sort((a,b)=>a-b);
+      return samples[Math.floor(samples.length/2)];
     }
 
-    function joinLeader(data){
-      try{
-        let payload=JSON.parse(data);
-        bpm=payload.bpm; bpmSlider.value=bpm; bpmDisplay.textContent=bpm;
-        beatsPerBar=payload.beatsPerBar; beatsPerBarSel.value=beatsPerBar;
-        startAt=payload.startAt;
-        offset=Date.now()-startAt;
-        startMetronome(startAt);
-      }catch(e){ alert("無效的 QR code"); }
+    function startMetronome() {
+      const circle = document.getElementById("circle");
+      let beat = false;
+      if (interval) clearInterval(interval);
+      interval = setInterval(()=>{
+        beat = !beat;
+        circle.style.background = beat ? "lightblue" : "lightgreen";
+        new AudioContext().createOscillator().start(); // 簡單 click
+      }, 60000/tempo);
     }
 
-    // Cancel role
-    document.getElementById("cancelRole").onclick=()=>{
-      leader=follower=false;
-      stopMetronome();
-      document.getElementById("qr").innerHTML="";
-      stopScan();
-      document.getElementById("cancelRole").style.display="none";
+    document.getElementById("be-leader").onclick = async ()=>{
+      isLeader = true;
+      tempo = 120;
+      document.getElementById("tempo").innerText = `Tempo: ${tempo}`;
+      startMetronome();
+      await fetch("/api/leaders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: "demo", tempo, allowChanges: true }),
+      });
     };
 
-    // Manual start/stop
-    document.getElementById("startBtn").onclick=()=>startMetronome(startAt||null);
-    document.getElementById("stopBtn").onclick=stopMetronome;
+    document.getElementById("join").onclick = async ()=>{
+      const offset = await timeSync();
+      console.log("offset", offset);
+      const res = await fetch("/api/leaders");
+      const leaders = await res.json();
+      if (leaders.length) {
+        tempo = leaders[0].tempo;
+        document.getElementById("tempo").innerText = `Tempo: ${tempo}`;
+        startMetronome();
+      }
+    };
   </script>
 </body>
 </html>
+
