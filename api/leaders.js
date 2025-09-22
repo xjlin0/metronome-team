@@ -13,7 +13,14 @@ function cleanupExpiredLeaders() {
   }
 }
 
-export default function handler(req, res) {
+let uuidv7;
+
+export default async function handler(req, res) {
+  if (!uuidv7) {
+    const { v7 } = await import('uuid');
+    uuidv7 = v7;
+  }
+
   if (req.method === 'GET') {
     cleanupExpiredLeaders();
     return res.status(200).json(Object.values(leaders));
@@ -22,13 +29,11 @@ export default function handler(req, res) {
   if (req.method === 'POST') {
     cleanupExpiredLeaders();
     const id = uuidv7();
-    leaders[id] = {
-      id,
-      createdAt: Date.now()
-    };
+    leaders[id] = { id, createdAt: Date.now() };
     return res.status(200).json(leaders[id]);
   }
 
   return res.status(405).json({ error: 'Method not allowed' });
 }
+
 

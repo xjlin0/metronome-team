@@ -7,34 +7,42 @@
 // offset = ((t2 - t1) + (t3 - t4)) / 2
 // delay  = (t4 - t1) - (t3 - t2)
 
+let pings = []; // 儲存最近多次採樣
+const MAX_SAMPLES = 10;
+
 export default async function handler(req, res) {
-  // allow GET for quick ping-check
-  if (req.method === 'GET') {
-    return res.json({ ok: true, serverTime: Date.now() });
+  const now = Date.now();
+
+  if (req.method === 'POST') {
+    // Client 發送 { clientTime: <timestamp> }
+    const { clientTime } = req.body;
+
+    if (!clientTime) {
+      return res.status(400).json({ error: 'Missing clientTime' });
+    }
+
+    const serverTime = Date.now();
+    const rtt = serverTime - clientTime; // round-trip time approximation
+
+    pings.push(rtt);
+    if (pings.length > MAX_SAMPLES) pings.shift();
+
+    // 取中位數，減少抖動
+    const sorted = [...pings].sort((a, b) => a - b);
+    const medianRtt = sorted[Math.floor(sorted.length / 2)];
+
+    // Debug info
+    console.log(`clientTime=${clientTime} serverTime=${serverTime} RTT=${rtt} medianRTT=${medianRtt}`);
+
+    return res.status(200).json({
+      clientTime,
+      serverTime,
+      rtt,
+      medianRtt
+    });
   }
 
-  if (req.method !== 'POST') {
-    res.status(405).json({ error: 'method not allowed' });
-    return;
-  }
-
-  try {
-    const body = req.body || {};
-    // client t1 may be provided or not; support both
-    const t1 = typeof body.t1 === 'number' ? body.t1 : null;
-
-    // t2: server receive time (as early as possible)
-    const t2 = Date.now();
-
-    // minimal synchronous processing here
-    // t3: server send time just before response; for better accuracy, recalc after small synchronous work
-    const t3 = Date.now();
-
-    // Return t1 (echo), t2 and t3
-    res.json({ t1, t2, t3 });
-  } catch (err) {
-    console.error('timesync error', err);
-    res.status(500).json({ error: 'internal error' });
-  }
+  return res.status(405).json({ error: 'Method not allowed' });
 }
+
 
