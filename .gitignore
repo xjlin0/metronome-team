@@ -1,2 +1,5 @@
 .tool-versions
 .env.local
+.vercel
+.env.development.local
+node_modules/
