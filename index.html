@@ -1,638 +1,148 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="zh">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>多人同步節拍器 MVP</title>
-
-<!-- QR + QR scan libs -->
-<script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/jsqr/dist/jsQR.js"></script>
-
+<meta charset="UTF-8">
+<title>Metronome MVP</title>
 <style>
-  :root { --bg:#0f1720; --panel:#0b1220; --muted:#9aa7b2; --accent:#36a3ff; --accent-strong:#ff7a7a; }
-  body { margin:0; font-family: "Noto Sans TC", Arial, sans-serif; background:var(--bg); color:#e6eef6; display:flex; justify-content:center; }
-  .wrap { width:100%; max-width:980px; padding:24px; }
-  header { text-align:center; margin-bottom:8px; }
-  h1 { margin:0; font-size:20px; }
-  .panel { background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); padding:16px; border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,0.6); }
-  .controls { display:flex; gap:12px; align-items:center; justify-content:center; flex-wrap:wrap; margin-bottom:12px; }
-  .control-group { display:flex; gap:8px; align-items:center; }
-  label { font-size:14px; color:var(--muted); }
-  input[type="range"] { width:260px; }
-  select, input[type=text] { padding:6px 8px; font-size:14px; border-radius:6px; border:1px solid rgba(255,255,255,0.06); background:transparent; color:#e6eef6; }
-  button { padding:8px 12px; border-radius:8px; background:#13243a; color:#e6eef6; border:1px solid rgba(255,255,255,0.04); cursor:pointer; }
-  button.primary { background: linear-gradient(90deg,var(--accent), #6ddaff); color:#022033; font-weight:600; border:none; }
-  .layout { display:grid; grid-template-columns: 1fr 420px; gap:16px; align-items:start; }
-  .visual { text-align:center; padding:12px; }
-  .circle { width:200px; height:200px; border-radius:50%; margin:10px auto; display:flex; align-items:center; justify-content:center; transition:transform .08s, background .08s; box-shadow:0 20px 50px rgba(0,0,0,0.6); background:linear-gradient(180deg,#0c1420,#07121a); }
-  .circle.on { transform:scale(1.06); }
-  .circle .label { font-size:26px; font-weight:700; letter-spacing:0.06em; color:#dff; }
-  .progress { width:80%; height:12px; background:#0b1622; border-radius:8px; overflow:hidden; margin:12px auto; }
-  .progress .fill { height:100%; width:0%; background:linear-gradient(90deg,var(--accent), #7af); transition:width .05s linear; }
-  .qr-area { padding:12px; background:rgba(255,255,255,0.02); border-radius:8px; text-align:center; }
-  textarea.code { width:100%; height:90px; background:transparent; color:#cfe8ff; border:1px dashed rgba(255,255,255,0.04); padding:8px; font-family:monospace; border-radius:6px; }
-  #qrCanvas canvas { width:220px; height:220px; }
-  .small { font-size:12px; color:var(--muted); margin-top:8px; }
-  .row { display:flex; gap:8px; justify-content:center; margin-top:8px; }
-  .hidden { display:none; }
-  .flag-link { color:#ffd; text-decoration:underline; }
-  footer { margin-top:12px; text-align:center; color:var(--muted); font-size:12px; }
+  body { text-align:center; font-family:sans-serif; margin:0; padding:20px; }
+  canvas { margin:20px auto; display:block; }
+  #qr { margin:20px auto; }
+  #controls { margin-top:20px; }
+  button { margin:5px; padding:10px 20px; font-size:16px; }
 </style>
 </head>
 <body>
-  <div class="wrap">
-    <header><h1>同步節拍器 MVP — 即時可用、QR 分享、相機掃描、Leader 推送設定</h1></header>
+<h2>🎵 線上節拍器 MVP</h2>
+<canvas id="beat" width="200" height="200"></canvas>
 
-    <div class="panel layout">
-      <!-- LEFT: main controls + visual -->
-      <div>
-        <div class="controls">
-          <div class="control-group">
-            <label>BPM</label>
-            <input id="bpmSlider" type="range" min="40" max="240" value="120">
-            <div id="bpmVal">120</div>
-          </div>
+<div id="controls">
+  <label>BPM: <input type="range" id="bpm" min="40" max="200" value="100"></label>
+  <span id="bpmVal">100</span><br>
+  <label>拍/小節: 
+    <select id="beatsPerBar">
+      <option value="0">無</option>
+      <option value="3">3</option>
+      <option value="4">4</option>
+    </select>
+  </label><br>
+  <button id="start">開始</button>
+  <button id="stop">停止</button>
+</div>
 
-          <div class="control-group">
-            <label>拍/小節</label>
-            <select id="beatsPerBar">
-              <option value="0">無</option>
-              <option value="2">2</option>
-              <option value="3">3</option>
-              <option value="4" selected>4</option>
-              <option value="6">6</option>
-            </select>
-          </div>
+<h3>Leader QR Code</h3>
+<canvas id="qr"></canvas>
 
-          <div class="control-group">
-            <label>Leader 名稱</label>
-            <input id="leaderName" type="text" value="">
-          </div>
-        </div>
+<h3>Follower</h3>
+<button id="scanQr">掃描 QR Code 加入</button>
+<video id="camera" width="200" autoplay playsinline style="display:none;"></video>
+<canvas id="cameraCanvas" width="200" height="200" style="display:none;"></canvas>
 
-        <div class="controls">
-          <button id="enableSound" class="primary">啟用聲音（必要時點一次）</button>
-          <button id="startBtn">開始</button>
-          <button id="stopBtn">停止</button>
-          <label style="display:flex;align-items:center;gap:6px;"><input id="mute" type="checkbox"> 靜音</label>
-        </div>
-
-        <div class="visual">
-          <div id="circle" class="circle"><div class="label" id="bpmLabel">120 BPM</div></div>
-          <div class="progress"><div id="progressFill" class="fill"></div></div>
-          <div class="small">視覺化圓圈與拍內進度；第一拍為強拍（色彩加強）</div>
-        </div>
-
-        <div style="margin-top:12px; display:flex; gap:8px; justify-content:center; flex-wrap:wrap;">
-          <button id="beLeader">成為 Leader</button>
-          <button id="beFollower">加入 Leader（掃 QR）</button>
-          <button id="bleScanBtn">掃描附近 Leader（BLE）</button>
-        </div>
-
-        <div id="scanInstructions" class="small">若桌機 Chrome 不支援 BLE，請開啟 <a class="flag-link" href="chrome://flags/#enable-experimental-web-platform-features">chrome://flags/#enable-experimental-web-platform-features</a>（Android Chrome 可實驗）。</div>
-
-      </div>
-
-      <!-- RIGHT: QR / leader list / camera -->
-      <div>
-        <div id="qrPanel" class="qr-area hidden">
-          <div><strong>Leader QR（掃描加入）</strong></div>
-          <div id="qrCanvas"></div>
-          <div class="row">
-            <button id="copySession">複製代碼</button>
-            <button id="downloadQR">下載 QR</button>
-            <button id="pasteAnswerBtn">貼上 Answer 完成連線</button>
-          </div>
-          <div class="small">Leader QR 包含會話與 Offer（若 follower 掃描會產生 Answer 並複製到剪貼簿，回傳給 Leader 貼上完成 P2P）。</div>
-        </div>
-
-        <div id="followerPanel" class="qr-area hidden">
-          <div><strong>掃描 Leader QR 或 手動貼代碼</strong></div>
-          <div class="row">
-            <button id="openCamera">📷 用相機掃描 QR</button>
-            <button id="cancelCamera" class="hidden">取消掃描</button>
-          </div>
-          <video id="qrVideo" class="hidden" autoplay playsinline></video>
-          <canvas id="qrCanvasHidden" class="hidden"></canvas>
-          <div style="margin-top:8px;">
-            <textarea id="manualSession" class="code" placeholder="手動貼上 Leader 提供的代碼（或掃描後自動填入）"></textarea>
-            <div class="row">
-              <button id="useManual">使用此代碼加入</button>
-            </div>
-          </div>
-          <div id="leaderList" class="small" style="text-align:left; margin-top:8px;"></div>
-        </div>
-
-        <div id="logs" class="small" style="margin-top:12px; max-height:260px; overflow:auto; text-align:left; background:rgba(255,255,255,0.02); padding:8px; border-radius:8px;"></div>
-      </div>
-    </div>
-
-    <footer>說明：視覺會立即啟動；瀏覽器通常要使用者互動才能播放聲音（按「啟用聲音」或任意點擊畫面即可）。QR 與 WebRTC 提供無伺服器 P2P（需一次性貼回 Answer）。</footer>
-  </div>
-
+<script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr/dist/jsQR.js"></script>
 <script>
-/* ====== 基本狀態與元素 ====== */
-const logEl = id('logs');
-function log(s){ logEl.innerHTML += '['+new Date().toLocaleTimeString()+'] '+s+'<br>'; logEl.scrollTop = logEl.scrollHeight; }
-function id(n){ return document.getElementById(n); }
+let audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let bpm = 100, beatsPerBar = 0, isRunning=false, timer=null, currentBeat=0;
+const beatCanvas = document.getElementById("beat");
+const ctx = beatCanvas.getContext("2d");
 
-const bpmSlider = id('bpmSlider');
-const bpmVal = id('bpmVal');
-const beatsPerBarSel = id('beatsPerBar');
-const leaderNameInput = id('leaderName');
-const startBtn = id('startBtn'), stopBtn = id('stopBtn'), enableSoundBtn = id('enableSound');
-const muteCb = id('mute');
-const circle = id('circle'), bpmLabel = id('bpmLabel'), progressFill = id('progressFill');
+// 自動 resume 音訊 (避免需要多一顆「啟用聲音」)
+document.body.addEventListener("click", ()=>{ if(audioCtx.state==="suspended") audioCtx.resume(); }, {once:true});
 
-const beLeaderBtn = id('beLeader'), beFollowerBtn = id('beFollower'), bleScanBtn = id('bleScanBtn');
-const qrPanel = id('qrPanel'), qrCanvas = id('qrCanvas'), copySessionBtn = id('copySession'), downloadQRBtn = id('downloadQR'), pasteAnswerBtn = id('pasteAnswerBtn');
-const followerPanel = id('followerPanel'), openCameraBtn = id('openCamera'), cancelCameraBtn = id('cancelCamera');
-const qrVideo = id('qrVideo'), qrCanvasHidden = id('qrCanvasHidden'), manualSessionTA = id('manualSession'), useManualBtn = id('useManual');
-const leaderListDiv = id('leaderList');
-
-/* ====== 音訊與 scheduler ====== */
-let audioCtx = null;
-let masterGain = null;
-let audioEnabled = false;
-let scheduleTimer = null;
-const lookaheadMs = 80;
-const scheduleAheadSeconds = 0.5;
-
-let running = false;
-let localRole = 'single'; // 'single' | 'leader' | 'follower'
-let bpm = Number(bpmSlider.value);
-let beatsPerBar = Number(beatsPerBarSel.value);
-let leaderConfig = null; // { bpm, beatsPerBar, startEpochMs, name } in epoch ms (Date.now())
-let offsetMs = 0; // leaderTime - localTime (ms) for follower (computed by ping/pong)
-let lastScheduledBeat = -1;
-
-/* ====== WebRTC state for live updates (manual handshake via QR & copyback) ====== */
-let pc = null, dataChannel = null;
-let pendingOfferB64 = null; // for leader QR
-let pingInterval = null;
-let pingSamples = [];
-
-/* ====== 初始化 UI & 立即啟動視覺（無聲） ====== */
-function init() {
-  leaderNameInput.value = '節拍器-' + randomSuffix(2);
-  bpmVal.textContent = bpmSlider.value;
-  bpmLabel.textContent = bpm + ' BPM';
-  startVisualMetronome(); // immediate visual-only start so page is instantly usable
-  attachEvents();
-  log('頁面初始化完成：視覺化已啟動。若要有聲音，請點「啟用聲音」或任意點擊畫面以解除瀏覽器自動播放限制。');
-}
-function randomSuffix(n=2){
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let s=''; for(let i=0;i<n;i++) s+=chars[Math.floor(Math.random()*chars.length)];
-  return s;
+function drawBeat(active) {
+  ctx.clearRect(0,0,200,200);
+  ctx.beginPath();
+  ctx.arc(100,100, active?80:50,0,2*Math.PI);
+  ctx.fillStyle = active? "red":"lightgray";
+  ctx.fill();
 }
 
-/* audio context lazy init & master gain */
-function ensureAudio() {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    masterGain = audioCtx.createGain();
-    masterGain.gain.value = muteCb.checked ? 0 : 1;
-    masterGain.connect(audioCtx.destination);
-    log('AudioContext 建立');
-  }
+function playClick(accent=false) {
+  let osc = audioCtx.createOscillator();
+  let gain = audioCtx.createGain();
+  osc.frequency.value = accent?1000:700;
+  gain.gain.setValueAtTime(0.2,audioCtx.currentTime);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime+0.1);
 }
 
-/* enable audio on first user gesture */
-function enableAudioByUserGesture(){
-  if (audioEnabled) return;
-  ensureAudio();
-  if (audioCtx.state === 'suspended') {
-    audioCtx.resume().then(()=> {
-      audioEnabled = true;
-      log('Audio 已啟用（使用者互動）');
-    });
-  } else {
-    audioEnabled = true;
-    log('Audio 已啟用');
-  }
+function startMetronome() {
+  if(isRunning) return;
+  isRunning=true;
+  currentBeat=0;
+  schedule();
 }
 
-/* audio click scheduled at audioCtx time */
-function scheduleClickAt(audioTime, strong=false){
-  if (!audioEnabled) return; // do nothing if audio not enabled
-  const o = audioCtx.createOscillator();
-  const g = audioCtx.createGain();
-  o.type = 'sine';
-  o.frequency.value = strong ? 1000 : 700;
-  o.connect(g); g.connect(masterGain);
-  g.gain.setValueAtTime(0, audioTime);
-  g.gain.linearRampToValueAtTime(0.9, audioTime + 0.001);
-  g.gain.exponentialRampToValueAtTime(0.001, audioTime + 0.12);
-  o.start(audioTime); o.stop(audioTime + 0.13);
+function stopMetronome() {
+  isRunning=false;
+  clearInterval(timer);
+  drawBeat(false);
 }
 
-/* visual-only scheduler for immediate UX (uses perf.now) */
-let visualTimer = null;
-function startVisualMetronome(){
-  // set default leaderConfig to local single-mode using epoch time reference
-  leaderConfig = { bpm: Number(bpmSlider.value), beatsPerBar: Number(beatsPerBarSel.value), startEpochMs: Date.now(), name: leaderNameInput.value };
-  lastScheduledBeat = -1;
-  if (visualTimer) clearInterval(visualTimer);
-  visualTimer = setInterval(()=> {
-    const nowEpoch = Date.now();
-    const intervalMs = 60000 / leaderConfig.bpm;
-    const elapsed = nowEpoch - leaderConfig.startEpochMs;
-    const beatIndex = Math.floor(Math.max(0, elapsed / intervalMs));
-    const nextBeatTime = leaderConfig.startEpochMs + (beatIndex + 1) * intervalMs;
-    const msToNext = nextBeatTime - nowEpoch;
-    const frac = 1 - (msToNext / intervalMs);
-    progressFill.style.width = `${Math.max(0,Math.min(1,frac))*100}%`;
-    // flash circle when crossing threshold
-    if (msToNext <  (intervalMs * 0.05) && (lastScheduledBeat !== beatIndex+1)) {
-      const isStrong = (leaderConfig.beatsPerBar>0) ? (( (beatIndex+1) % leaderConfig.beatsPerBar) === 1 ) : false;
-      flashVisual(isStrong);
-      lastScheduledBeat = beatIndex+1;
-    }
-  }, 30);
+function schedule() {
+  let interval = 60000/bpm;
+  timer = setInterval(()=>{
+    let accent = (beatsPerBar>0 && currentBeat%beatsPerBar===0);
+    playClick(accent);
+    drawBeat(true);
+    setTimeout(()=>drawBeat(false), interval/2);
+    currentBeat++;
+  }, interval);
 }
 
-/* flash visual circle */
-function flashVisual(strong=false){
-  circle.classList.add('on');
-  circle.style.background = strong ? 'linear-gradient(90deg,var(--accent-strong), #ffb4b4)' : 'linear-gradient(90deg,var(--accent), #7af)';
-  setTimeout(()=> { circle.classList.remove('on'); circle.style.background='linear-gradient(180deg,#0c1420,#07121a)'; }, 90);
+// 更新 UI 即時生效
+document.getElementById("bpm").oninput=(e)=>{
+  bpm = parseInt(e.target.value);
+  document.getElementById("bpmVal").textContent=bpm;
+  if(isRunning){ stopMetronome(); startMetronome(); updateLeaderInfo(); }
+};
+document.getElementById("beatsPerBar").onchange=(e)=>{
+  beatsPerBar=parseInt(e.target.value);
+  if(isRunning){ stopMetronome(); startMetronome(); updateLeaderInfo(); }
+};
+document.getElementById("start").onclick=()=>{ startMetronome(); updateLeaderInfo(); };
+document.getElementById("stop").onclick=()=> stopMetronome();
+
+// Leader QR Code
+function updateLeaderInfo(){
+  let info = JSON.stringify({ bpm, beatsPerBar });
+  QRCode.toCanvas(document.getElementById("qr"), info, {width:200});
 }
 
-/* audio+precise scheduler using WebAudio's time (schedules ahead) */
-function startScheduler() {
-  if (scheduleTimer) return;
-  lastScheduledBeat = -1;
-  scheduleTimer = setInterval(schedulerTick, lookaheadMs);
-  log('精準排程器已啟動');
-}
-function stopScheduler() {
-  if (scheduleTimer) { clearInterval(scheduleTimer); scheduleTimer = null; }
-  lastScheduledBeat = -1;
-  log('精準排程器已停止');
-}
-function schedulerTick(){
-  if (!leaderConfig) return;
-  const localNowPerf = performance.now();
-  // leaderEpochMs - localEpochMs = leaderEpochMs - Date.now(); but we need leader time in perf space
-  // Use: leaderPerfNow = localPerfNow + (leaderEpochMs - Date.now())
-  const epochToPerfDelta = leaderConfig.startEpochMs - Date.now(); // leader.startEpochMs - current local epoch
-  const leaderNowPerf = localNowPerf + epochToPerfDelta + offsetMs; // add offset for follower
-  const intervalMs = 60000 / leaderConfig.bpm;
-  const aheadMs = scheduleAheadSeconds * 1000;
-  const maxBeatToSchedule = Math.floor((leaderNowPerf + aheadMs - (convertEpochToPerf(leaderConfig.startEpochMs))) / intervalMs);
+// Follower 掃描
+const video = document.getElementById("camera");
+const cameraCanvas=document.getElementById("cameraCanvas");
+const camCtx=cameraCanvas.getContext("2d");
 
-  for (let b = Math.max(lastScheduledBeat+1, 0); b <= maxBeatToSchedule; b++){
-    const beatLeaderPerf = convertBeatIndexToLeaderPerf(b);
-    const localPlayDelayMs = beatLeaderPerf - localNowPerf - offsetMs;
-    if (localPlayDelayMs < -80) { lastScheduledBeat = b; continue; }
-    const playAtAudioTime = audioEnabled && audioCtx ? (audioCtx.currentTime + Math.max(0, localPlayDelayMs/1000)) : null;
-    const inBarIndex = leaderConfig.beatsPerBar > 0 ? (b % leaderConfig.beatsPerBar) : -1;
-    const strong = (leaderConfig.beatsPerBar>0 && inBarIndex === 0);
-    if (playAtAudioTime && audioEnabled) scheduleClickAt(playAtAudioTime, strong);
-    // schedule visual flash
-    setTimeout(()=> { flashVisual(strong); }, Math.max(0, localPlayDelayMs));
-    lastScheduledBeat = b;
-  }
-  // update progress fill based on leaderNowPerf
-  const elapsedMs = leaderNowPerf - convertEpochToPerf(leaderConfig.startEpochMs);
-  const curBeatIndex = Math.max(0,Math.floor(elapsedMs / (60000/leaderConfig.bpm)));
-  const nextBeatPerf = convertBeatIndexToLeaderPerf(curBeatIndex+1);
-  const frac = 1 - ((nextBeatPerf - leaderNowPerf) / (60000/leaderConfig.bpm));
-  progressFill.style.width = `${Math.max(0,Math.min(1,frac))*100}%`;
-}
-function convertEpochToPerf(epochMs){
-  // approximate: performance.now() corresponds to Date.now() -> compute perf time for given epoch
-  return performance.now() + (epochMs - Date.now());
-}
-function convertBeatIndexToLeaderPerf(beatIdx){
-  const intervalMs = 60000 / leaderConfig.bpm;
-  return convertEpochToPerf(leaderConfig.startEpochMs) + beatIdx * intervalMs;
-}
+document.getElementById("scanQr").onclick=async()=>{
+  video.style.display="block"; cameraCanvas.style.display="block";
+  const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}});
+  video.srcObject=stream;
+  scanLoop();
+};
 
-/* ====== UI events ====== */
-function attachEvents(){
-  // audio enable button & any first click anywhere enables audio
-  enableSoundBtn.addEventListener('click', ()=> { enableAudioByUserGesture(); startScheduler(); });
-  document.body.addEventListener('pointerdown', () => { if(!audioEnabled) { enableAudioByUserGesture(); startScheduler(); } }, { once:true });
-
-  bpmSlider.addEventListener('input', ()=> {
-    bpm = Number(bpmSlider.value); bpmVal.textContent = bpm; bpmLabel.textContent = `${bpm} BPM`;
-    // if leader, update leaderConfig and push to followers
-    if (localRole === 'leader') {
-      scheduleLeaderConfigUpdate({ bpm });
-    } else {
-      // update local visual/leaderConfig for single mode
-      leaderConfig.bpm = bpm;
-    }
-  });
-  beatsPerBarSel.addEventListener('change', ()=> {
-    beatsPerBar = Number(beatsPerBarSel.value);
-    if (localRole === 'leader') scheduleLeaderConfigUpdate({ beatsPerBar });
-    else leaderConfig.beatsPerBar = beatsPerBar;
-  });
-  startBtn.addEventListener('click', ()=> {
-    // start local scheduler (will use leaderConfig)
-    if (!leaderConfig) leaderConfig = { bpm, beatsPerBar, startEpochMs: Date.now(), name: leaderNameInput.value };
-    startScheduler();
-    log('按下開始（精準排程啟動）');
-  });
-  stopBtn.addEventListener('click', ()=> {
-    stopScheduler();
-    log('按下停止（精準排程停止）');
-  });
-
-  beLeaderBtn.addEventListener('click', async ()=> {
-    localRole = 'leader';
-    leaderConfig = { bpm: Number(bpmSlider.value), beatsPerBar: Number(beatsPerBarSel.value), startEpochMs: Date.now(), name: leaderNameInput.value || ('節拍器-'+randomSuffix(2)) };
-    // create RTCPeerConnection & dataChannel
-    await createLeaderOfferAndShowQR();
-    qrPanel.classList.remove('hidden');
-    followerPanel.classList.add('hidden');
-    log('已成為 Leader（QR 已產生，scan 後 follower 會回傳 Answer）');
-    // also start local scheduler & send config once datachannel opens
-    startScheduler();
-  });
-
-  pasteAnswerBtn.addEventListener('click', async ()=> {
-    // Leader pastes follower's answer (from clipboard or prompt)
-    const ans = prompt('請貼上 follower 提供的 Answer（從 follower 複製過來）：');
-    if (!ans) return;
-    try {
-      const answer = JSON.parse(atob(ans));
-      await pc.setRemoteDescription(new RTCSessionDescription(answer));
-      log('Leader: 已設定 remoteDescription (answer)。');
-    } catch(e) { log('Leader 設定 Answer 失敗：'+e); alert('貼上 Answer 失敗：'+e); }
-  });
-
-  beFollowerBtn.addEventListener('click', ()=> {
-    localRole = 'follower';
-    followerPanel.classList.remove('hidden');
-    qrPanel.classList.add('hidden');
-  });
-
-  openCameraBtn.addEventListener('click', ()=> startCameraScan());
-  cancelCameraBtn.addEventListener('click', ()=> stopCameraScan());
-  useManualBtn.addEventListener('click', ()=> {
-    const txt = manualSessionTA.value.trim();
-    if (!txt) return alert('請貼上 Leader 代碼後再按此');
-    try { const session = JSON.parse(atob(txt)); useScannedSession(session); } catch(e){ alert('代碼解析失敗：'+e); }
-  });
-
-  bleScanBtn.addEventListener('click', ()=> {
-    if (!('bluetooth' in navigator) || !navigator.bluetooth.requestLEScan) {
-      alert('此瀏覽器不支援 BLE 掃描（或需開啟 chrome flags）。');
-      return;
-    }
-    // BLE scan (experimental) - show available advertisements
-    startBLEScan();
-  });
-  // mute control
-  muteCb.addEventListener('change', ()=> {
-    if (masterGain) masterGain.gain.setValueAtTime(muteCb.checked ? 0 : 1, audioCtx.currentTime);
-  });
-}
-
-/* ====== WebRTC offer in QR (leader) ====== */
-async function createLeaderOfferAndShowQR(){
-  // create pc
-  if (pc) try{ pc.close(); }catch(e){}
-  pc = new RTCPeerConnection();
-  pc.onconnectionstatechange = ()=> log('PC state: '+pc.connectionState);
-  dataChannel = pc.createDataChannel('sync');
-  setupDataChannel(dataChannel, true);
-
-  // create offer
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  const session = {
-    type:'leaderSession',
-    name: leaderConfig.name,
-    bpm: leaderConfig.bpm,
-    beatsPerBar: leaderConfig.beatsPerBar,
-    startEpochMs: leaderConfig.startEpochMs,
-    offer: offer // include full offer object (may be large)
-  };
-  const sessionB64 = btoa(JSON.stringify(session));
-  pendingOfferB64 = sessionB64;
-  // render QR
-  qrCanvas.innerHTML = '';
-  try { QRCode.toCanvas(qrCanvas, sessionB64, { width:220 }); } catch(e){ log('QR 生成失敗：'+e); }
-  // copy button handler
-  copySessionBtn.onclick = async ()=> {
-    try { await navigator.clipboard.writeText(sessionB64); log('Leader session 已複製到剪貼簿'); alert('已複製，貼給 follower 掃描或貼上'); } catch(e){ alert('複製失敗，請手動選取'); }
-  };
-  downloadQRBtn.onclick = ()=> {
-    const canv = qrCanvas.querySelector('canvas'); if (!canv) return alert('QR 尚未生成');
-    const url = canv.toDataURL('image/png'); const a=document.createElement('a'); a.href=url; a.download='leader-session.png'; a.click();
-  };
-}
-
-/* data channel handlers */
-function setupDataChannel(ch, isLeader) {
-  ch.onopen = ()=> {
-    log('DataChannel open (' + (isLeader?'leader':'follower') + ')');
-    if (isLeader) {
-      // send current config immediately
-      sendConfigToFollowers();
-    } else {
-      // follower starts pinging for offset measurement
-      if (pingInterval) clearInterval(pingInterval);
-      pingInterval = setInterval(()=> {
-        try { ch.send(JSON.stringify({ type:'ping', t0: performance.now() })); } catch(e){ }
-      }, 1500);
-    }
-  };
-  ch.onmessage = (ev)=> {
-    try {
-      const msg = JSON.parse(ev.data);
-      if (msg.type === 'ping' && dataChannel && localRole === 'leader') {
-        const t1 = performance.now();
-        dataChannel.send(JSON.stringify({ type:'pong', t0:msg.t0, t1 }));
-      } else if (msg.type === 'pong' && localRole === 'follower') {
-        const t3 = performance.now();
-        const t0 = msg.t0, t1 = msg.t1;
-        const rtt = t3 - t0;
-        const estimatedLeaderNow = t1 + rtt/2;
-        const newOffset = estimatedLeaderNow - t3;
-        pingSamples.push(newOffset); if (pingSamples.length>9) pingSamples.shift();
-        const sorted = [...pingSamples].sort((a,b)=>a-b);
-        offsetMs = sorted[Math.floor(sorted.length/2)];
-        log('offsetSamples='+pingSamples.map(x=>x.toFixed(1)).join(', ') + ' => offset=' + offsetMs.toFixed(1) + ' ms');
-      } else if (msg.type === 'config') {
-        // follower receives leader config update
-        leaderConfig = { bpm: msg.bpm, beatsPerBar: msg.beatsPerBar, startEpochMs: msg.startEpochMs, name: msg.name };
-        bpmSlider.value = leaderConfig.bpm; bpmVal.textContent = leaderConfig.bpm;
-        beatsPerBarSel.value = leaderConfig.beatsPerBar;
-        log('收到 leader config update: BPM='+leaderConfig.bpm+', beatsPerBar='+leaderConfig.beatsPerBar);
-        // start scheduler if not started
-        startScheduler();
-      }
-    } catch(e){ log('處理 datachannel 訊息失敗: '+e); }
-  };
-  ch.onclose = ()=> { log('DataChannel closed'); if (pingInterval) clearInterval(pingInterval); pingInterval=null; };
-}
-
-/* leader: send config to connected followers */
-function sendConfigToFollowers(){
-  if (dataChannel && dataChannel.readyState === 'open') {
-    const cfg = { type:'config', bpm: leaderConfig.bpm, beatsPerBar: leaderConfig.beatsPerBar, startEpochMs: leaderConfig.startEpochMs, name: leaderConfig.name };
-    try { dataChannel.send(JSON.stringify(cfg)); log('Leader: 已發送 config'); } catch(e){ log('Leader: 發 config 失敗:'+e); }
-  }
-}
-
-/* when leader changes bpm/beats: schedule update to take effect slightly in future and push to followers */
-function scheduleLeaderConfigUpdate(changes){
-  // compute new config with future effective time (short grace for propagation)
-  const graceMs = 500; // 0.5s to give followers time
-  leaderConfig = leaderConfig || { bpm, beatsPerBar, startEpochMs: Date.now(), name: leaderNameInput.value };
-  if (changes.bpm !== undefined) leaderConfig.bpm = changes.bpm;
-  if (changes.beatsPerBar !== undefined) leaderConfig.beatsPerBar = changes.beatsPerBar;
-  // set startEpochMs to now + small offset so everyone switches in sync
-  leaderConfig.startEpochMs = Date.now() + graceMs;
-  leaderConfig.name = leaderNameInput.value || leaderConfig.name;
-  // update QR immediately as well
-  if (pendingOfferB64) {
-    // we regenerate the minimal session object for QR that includes latest config and still includes offer
-    try {
-      const old = JSON.parse(atob(pendingOfferB64));
-      old.bpm = leaderConfig.bpm;
-      old.beatsPerBar = leaderConfig.beatsPerBar;
-      old.startEpochMs = leaderConfig.startEpochMs;
-      const newB64 = btoa(JSON.stringify(old));
-      pendingOfferB64 = newB64;
-      qrCanvas.innerHTML = '';
-      QRCode.toCanvas(qrCanvas, pendingOfferB64, { width:220 });
-    } catch(e){ /* ignore */ }
-  }
-  // send live config via dataChannel if open
-  sendConfigToFollowers();
-  // update local scheduler to adopt new config at startEpochMs
-  startScheduler();
-}
-
-/* ====== Camera QR scan for follower (with cancel) ====== */
-let cameraStream = null;
-let scanTick = null;
-async function startCameraScan(){
-  try {
-    cameraStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-    qrVideo.srcObject = cameraStream;
-    qrVideo.classList.remove('hidden');
-    qrCanvasHidden.classList.remove('hidden');
-    openCameraBtn.classList.add('hidden');
-    cancelCameraBtn.classList.remove('hidden');
-    followerPanelScrollIntoView();
-    scanTick = requestAnimationFrame(scanLoop);
-    log('相機掃描已啟動');
-  } catch(e) { alert('啟動相機失敗：' + e); log('相機啟動失敗：'+e); }
-}
-function stopCameraScan(){
-  if (cameraStream) cameraStream.getTracks().forEach(t=>t.stop());
-  cameraStream = null;
-  qrVideo.classList.add('hidden');
-  qrCanvasHidden.classList.add('hidden');
-  openCameraBtn.classList.remove('hidden');
-  cancelCameraBtn.classList.add('hidden');
-  if (scanTick) cancelAnimationFrame(scanTick);
-  scanTick = null;
-  log('相機掃描已取消');
-}
-function followerPanelScrollIntoView(){ try{ followerPanel.scrollIntoView({behavior:'smooth'});}catch(e){}; }
 function scanLoop(){
-  if (!cameraStream) return;
-  const video = qrVideo, canvas = qrCanvasHidden, ctx = canvas.getContext('2d');
-  if (video.readyState === video.HAVE_ENOUGH_DATA) {
-    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
-    ctx.drawImage(video,0,0,canvas.width,canvas.height);
-    const img = ctx.getImageData(0,0,canvas.width,canvas.height);
-    const code = jsQR(img.data, canvas.width, canvas.height);
-    if (code) {
-      // found QR
-      try {
-        const session = JSON.parse(atob(code.data));
-        log('掃描到 session');
-        stopCameraScan();
-        useScannedSession(session);
-        return;
-      } catch(e) {
-        log('QR 內容解析失敗：'+e);
-      }
-    }
-  }
-  scanTick = requestAnimationFrame(scanLoop);
-}
-
-/* ====== Use session scanned/ pasted by follower ====== */
-async function useScannedSession(session){
-  // session should be object containing offer (for P2P) or minimal config
-  if (!session) { alert('session 無效'); return; }
-  if (session.offer) {
-    // this is leaderSession with Offer object -> perform WebRTC Answer
-    try {
-      // create pc
-      if (pc) try{ pc.close(); }catch(e){}
-      pc = new RTCPeerConnection();
-      pc.ondatachannel = (ev)=> { dataChannel = ev.channel; setupDataChannel(dataChannel, false); };
-      await pc.setRemoteDescription(new RTCSessionDescription(session.offer));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      // copy answer to clipboard for follower to send back to leader (manual step)
-      const answerB64 = btoa(JSON.stringify(answer));
-      try { await navigator.clipboard.writeText(answerB64); alert('Answer 已複製到剪貼簿，請貼回給 Leader（讓 Leader 貼上完成連線）'); }
-      catch(e){ prompt('請將這段 Answer 回傳給 Leader：', answerB64); }
-      // also set preliminary leaderConfig from session's config (so follower can immediate align)
-      leaderConfig = { bpm: session.bpm, beatsPerBar: session.beatsPerBar, startEpochMs: session.startEpochMs, name: session.name };
-      bpmSlider.value = leaderConfig.bpm; bpmVal.textContent = leaderConfig.bpm; beatsPerBarSel.value = leaderConfig.beatsPerBar;
-      startScheduler();
-      log('已建立本地 Answer（已複製），請回傳給 Leader 完成 P2P');
-    } catch(e){ log('建立 Answer 失敗：'+e); alert('建立 Answer 失敗：'+e); }
-  } else {
-    // minimal session (no offer) -> just use config directly
-    leaderConfig = { bpm: session.bpm, beatsPerBar: session.beatsPerBar, startEpochMs: session.startEpochMs, name: session.name };
-    bpmSlider.value = leaderConfig.bpm; bpmVal.textContent = leaderConfig.bpm; beatsPerBarSel.value = leaderConfig.beatsPerBar;
-    startScheduler();
-    log('使用 leader 的設定開始同步（非 P2P 模式，無 RTT 校正）');
-  }
-}
-
-/* ====== BLE scanning (experimental, may not work on desktop) ====== */
-async function startBLEScan(){
-  if (!('bluetooth' in navigator) || !navigator.bluetooth.requestLEScan) {
-    alert('此瀏覽器不支援 BLE 掃描（或需打開 Chrome flags）。');
+  camCtx.drawImage(video,0,0,200,200);
+  let imgData = camCtx.getImageData(0,0,200,200);
+  let code = jsQR(imgData.data,imgData.width,imgData.height);
+  if(code){
+    let data = JSON.parse(code.data);
+    bpm=data.bpm; beatsPerBar=data.beatsPerBar;
+    document.getElementById("bpm").value=bpm;
+    document.getElementById("bpmVal").textContent=bpm;
+    document.getElementById("beatsPerBar").value=beatsPerBar;
+    stopMetronome(); startMetronome();
+    alert("已加入 Leader 節拍設定!");
+    video.srcObject.getTracks().forEach(t=>t.stop());
+    video.style.display="none"; cameraCanvas.style.display="none";
     return;
   }
-  const scan = await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements:true, keepRepeatedDevices:true });
-  leaderListDiv.innerHTML = '<div>正在掃描 Nearby BLE 廣播...</div>';
-  navigator.bluetooth.addEventListener('advertisementreceived', ev => {
-    // try parse manufacturerData -> as demo we expect base64 JSON in manufacturerData with key 0xFFFF
-    try {
-      for (const [key, value] of ev.manufacturerData.entries()) {
-        const arr = new Uint8Array(value.buffer);
-        const txt = new TextDecoder().decode(arr);
-        try {
-          const obj = JSON.parse(txt);
-          const btn = document.createElement('button');
-          btn.textContent = `${obj.name} (BPM ${obj.bpm})`;
-          btn.onclick = ()=> useScannedSession(obj);
-          leaderListDiv.appendChild(btn);
-        } catch(e){}
-      }
-    } catch(e){ log('BLE adv parse error: '+e); }
-  });
-  setTimeout(()=> { try{ scan.stop(); log('BLE 掃描停止（timeout）'); }catch(e){} }, 30000);
+  requestAnimationFrame(scanLoop);
 }
 
-/* ====== Helper: copy text fallback ====== */
-async function copyToClipboard(text){
-  try { await navigator.clipboard.writeText(text); log('已複製到剪貼簿'); return true; }
-  catch(e){ log('複製到剪貼簿失敗：'+e); return false; }
-}
-
-/* ====== Boot ====== */
-init();
-
+// 預設值
+updateLeaderInfo();
+drawBeat(false);
 </script>
 </body>
 </html>
