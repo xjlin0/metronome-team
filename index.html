@@ -1,57 +1,22 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html>
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Metronome Sync</title>
-  <link rel="stylesheet" href="style.css" />
+  <meta charset="UTF-8">
+  <title>Metronome</title>
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <h1>Metronome</h1>
 
-  <div id="circle" class="circle"></div>
-
-  <div class="controls">
-    <label>
-      BPM:
-      <input id="bpm" type="range" min="30" max="240" value="120">
-      <span id="bpmValue">120</span>
-    </label>
-
-    <label>
-      每小節拍數:
-      <select id="beatsPerMeasure">
-        <option value="0">無</option>
-        <option value="2">2</option>
-        <option value="3">3</option>
-        <option value="4" selected>4</option>
-      </select>
-    </label>
-
-    <div style="margin-top:8px;">
-      <button id="startBtn">Start</button>
-      <button id="stopBtn">Stop</button>
-    </div>
-  </div>
-
-  <hr/>
-
   <div>
-    <button id="leaderBtn">Start as Leader</button>
-    <label style="margin-left:10px;"><input id="allowChanges" type="checkbox"> 允許 followers 修改節拍</label>
-    <button id="followerBtn" style="margin-left:10px;">Join as Follower</button>
+    BPM: <input id="bpm" type="number" value="120" min="30" max="300">
+    Beats per measure: <input id="beats" type="number" value="4" min="1" max="16">
   </div>
 
-  <div id="leaderList" style="margin-top:12px;"></div>
+  <button id="startLeader">Start as Leader</button>
+  <button id="joinFollower">Join as Follower</button>
 
-  <div id="debug" style="text-align:left; max-width:720px; margin:16px auto; background:#f3f4f6; color:#111; padding:10px; border-radius:6px;">
-    <strong>Debug（ms）</strong><br>
-    本機時間: <span id="dbgLocal">-</span><br>
-    最後 offset (server - local): <span id="dbgOffset">-</span><br>
-    last delay RTT: <span id="dbgDelay">-</span><br>
-    leader startTime: <span id="dbgLeaderStart">-</span><br>
-    current beat index: <span id="dbgBeat">-</span>
-  </div>
+  <div id="circle" style="width:100px;height:100px;border-radius:50%;background:hsl(200,70%,50%);margin:50px auto;"></div>
 
   <script src="metronome.js"></script>
 </body>

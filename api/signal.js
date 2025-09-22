@@ -1,20 +1,29 @@
-import { kv } from "@vercel/kv";
+// api/signal.js
+let offers = {};
+let answers = {};
 
 export default async function handler(req, res) {
-  const { id, type, data } = req.body;
+  if (req.method === 'POST') {
+    const { type, id, payload } = req.body;
+    if (!type || !id || !payload) return res.status(400).json({ error: 'Missing fields' });
 
-  if (req.method === "POST") {
-    // 存入訊號
-    await kv.rpush(`signal:${id}`, JSON.stringify({ type, data }));
-    return res.json({ ok: true });
+    if (type === 'offer') {
+      offers[id] = payload;
+      return res.status(200).json({ status: 'offer stored' });
+    }
+    if (type === 'answer') {
+      answers[id] = payload;
+      return res.status(200).json({ status: 'answer stored' });
+    }
+    return res.status(400).json({ error: 'Invalid type' });
   }
 
-  if (req.method === "GET") {
-    const signals = await kv.lrange(`signal:${id}`, 0, -1);
-    await kv.del(`signal:${id}`);
-    return res.json(signals.map((s) => JSON.parse(s)));
+  if (req.method === 'GET') {
+    const { type, id } = req.query;
+    if (type === 'offer') return res.status(200).json({ payload: offers[id] || null });
+    if (type === 'answer') return res.status(200).json({ payload: answers[id] || null });
+    return res.status(400).json({ error: 'Invalid query' });
   }
 
-  res.status(405).json({ error: "Method not allowed" });
+  return res.status(405).json({ error: 'Method not allowed' });
 }
-

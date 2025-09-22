@@ -1,4 +1,3 @@
-// metronome.js
 let isLeader = false;
 let leaderId = null;
 let startTime = null;
@@ -7,128 +6,99 @@ let beatsPerMeasure = 4;
 
 const leadersAPI = '/api/leaders';
 const timesyncAPI = '/api/timesync';
-
-const circle = document.getElementById('circle');
-const bpmInput = document.getElementById('bpm');
-const beatsInput = document.getElementById('beats');
-const startBtn = document.getElementById('startLeader');
-const joinBtn = document.getElementById('joinFollower');
+const signalAPI = '/api/signal';
 
 let rtcConnection;
 let dataChannel;
-let followerOffsets = [];
 
-// -----------------------
-// UI
-// -----------------------
-function renderCircle(activeBeat, measureBeat) {
-  const hue = activeBeat === 0 ? 0 : 200; // 起拍紅色，其他藍色
-  circle.style.backgroundColor = `hsl(${hue}, 70%, 50%)`;
-}
+// DOM elements
+document.addEventListener('DOMContentLoaded', () => {
+  const circle = document.getElementById('circle');
+  const bpmInput = document.getElementById('bpm');
+  const beatsInput = document.getElementById('beats');
+  const startBtn = document.getElementById('startLeader');
+  const joinBtn = document.getElementById('joinFollower');
 
-function startLocalMetronome(offset = 0) {
-  const intervalMs = (60_000 / bpm);
-  let beat = 0;
-  setInterval(() => {
-    renderCircle(beat % beatsPerMeasure, beat % beatsPerMeasure);
-    if (isLeader && dataChannel?.readyState === 'open') {
-      dataChannel.send(JSON.stringify({ type: 'beat', beat: beat % beatsPerMeasure, timestamp: Date.now() }));
-    }
-    beat++;
-  }, intervalMs);
-}
+  bpmInput.onchange = () => bpm = parseInt(bpmInput.value);
+  beatsInput.onchange = () => beatsPerMeasure = parseInt(beatsInput.value);
 
-// -----------------------
-// API Calls
-// -----------------------
-async function createLeader() {
-  const res = await fetch(leadersAPI, { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
-  const data = await res.json();
-  leaderId = data.id;
-  startTime = data.startTime || null;
-  alert('leader created: ' + leaderId + '\nstartTime: ' + startTime);
-  return data;
-}
-
-async function timesync() {
-  const clientTime = Date.now();
-  const res = await fetch(timesyncAPI, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ clientTime })
-  });
-  if (!res.ok) {
-    console.error(await res.text());
-    return null;
+  function renderCircle(activeBeat) {
+    const hue = activeBeat === 0 ? 0 : 200;
+    circle.style.backgroundColor = `hsl(${hue},70%,50%)`;
   }
-  const data = await res.json();
-  const t4 = Date.now();
-  const offset = ((data.t2 - clientTime) + (data.t3 - t4)) / 2;
-  console.log('RTT offset debug (ms):', offset, 'RTT:', data.rtt);
-  return offset;
-}
 
-// -----------------------
-// WebRTC / DataChannel
-// -----------------------
-async function setupLeaderConnection() {
-  rtcConnection = new RTCPeerConnection();
-  dataChannel = rtcConnection.createDataChannel('beatSync');
-
-  dataChannel.onopen = () => console.log('DataChannel open');
-  dataChannel.onmessage = (e) => console.log('Leader received:', e.data);
-
-  rtcConnection.onicecandidate = (e) => {
-    if (e.candidate) {
-      console.log('ICE candidate:', e.candidate);
-    }
-  };
-
-  // Leader creates offer
-  const offer = await rtcConnection.createOffer();
-  await rtcConnection.setLocalDescription(offer);
-
-  console.log('Offer created, send to signaling server (not implemented demo)');
-}
-
-async function joinAsFollower(offer) {
-  isLeader = false;
-  rtcConnection = new RTCPeerConnection();
-  rtcConnection.ondatachannel = (e) => {
-    dataChannel = e.channel;
-    dataChannel.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.type === 'beat') {
-        // follower 收到 beat, 計算延遲 offset
-        console.log('Follower beat received', msg.beat, 'timestamp', msg.timestamp);
+  function startLocalMetronome() {
+    const intervalMs = 60000 / bpm;
+    let beat = 0;
+    setInterval(() => {
+      renderCircle(beat % beatsPerMeasure);
+      if (isLeader && dataChannel?.readyState==='open') {
+        dataChannel.send(JSON.stringify({ type:'beat', beat:beat%beatsPerMeasure, timestamp:Date.now(), bpm, beatsPerMeasure }));
       }
-    };
+      beat++;
+    }, intervalMs);
+  }
+
+  async function createLeader() {
+    const res = await fetch(leadersAPI, { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+    const data = await res.json();
+    leaderId = data.id;
+    startTime = data.startTime || null;
+    bpm = data.bpm;
+    beatsPerMeasure = data.beatsPerMeasure;
+    bpmInput.value = bpm;
+    beatsInput.value = beatsPerMeasure;
+    alert('leader created: '+leaderId+'\nstartTime: '+startTime);
+  }
+
+  async function timesync() {
+    const clientTime = Date.now();
+    const res = await fetch(timesyncAPI, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({clientTime})});
+    if (!res.ok) { console.error(await res.text()); return; }
+    const data = await res.json();
+    const t4 = Date.now();
+    const offset = ((data.t2-clientTime)+(data.t3-t4))/2;
+    console.log('RTT offset debug (ms):', offset, 'RTT:', data.rtt);
+  }
+
+  async function setupLeaderConnection() {
+    rtcConnection = new RTCPeerConnection();
+    dataChannel = rtcConnection.createDataChannel('beatSync');
+    dataChannel.onopen = ()=>console.log('DataChannel open');
+    dataChannel.onmessage = e=>console.log('Follower beat:', e.data);
+    rtcConnection.onicecandidate = e=>{ if(e.candidate) console.log('ICE candidate:',e.candidate); };
+    const offer = await rtcConnection.createOffer();
+    await rtcConnection.setLocalDescription(offer);
+    await fetch(signalAPI, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'offer',id:leaderId,payload:offer}) });
+  }
+
+  startBtn.onclick = async () => {
+    isLeader=true;
+    await createLeader();
+    await timesync();
+    startLocalMetronome();
+    setupLeaderConnection();
   };
-  await rtcConnection.setRemoteDescription(offer);
-  const answer = await rtcConnection.createAnswer();
-  await rtcConnection.setLocalDescription(answer);
-  console.log('Answer created, send back to leader via signaling server');
-}
 
-// -----------------------
-// Event Listeners
-// -----------------------
-startBtn.onclick = async () => {
-  isLeader = true;
-  await createLeader();
-  await timesync();
+  joinBtn.onclick = async () => {
+    isLeader=false;
+    await timesync();
+    startLocalMetronome();
+    const leaderIdPrompt = prompt('Enter leader ID:');
+    const offerRes = await fetch(`${signalAPI}?type=offer&id=${leaderIdPrompt}`);
+    const { payload: offer } = await offerRes.json();
+    if (!offer) return alert('Leader offer not found');
+    rtcConnection = new RTCPeerConnection();
+    rtcConnection.ondatachannel = e=>{
+      dataChannel=e.channel;
+      dataChannel.onmessage=ev=>console.log('Beat received:', ev.data);
+    };
+    await rtcConnection.setRemoteDescription(offer);
+    const answer = await rtcConnection.createAnswer();
+    await rtcConnection.setLocalDescription(answer);
+    await fetch(signalAPI, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type:'answer',id:leaderIdPrompt,payload:answer}) });
+  };
+
+  // 首次訪問就能看到圈圈動起來
   startLocalMetronome();
-  setupLeaderConnection();
-};
-
-joinBtn.onclick = async () => {
-  isLeader = false;
-  await timesync();
-  startLocalMetronome();
-  // joinAsFollower(offer) // signaling server 未實作
-};
-
-// -----------------------
-// Immediate UI render
-// -----------------------
-startLocalMetronome(); // 保證首次訪問就能看到圈圈動起來
+});
