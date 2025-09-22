@@ -1,45 +1,57 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-TW">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Metronome Sync</title>
-  <style>
-    body { font-family: sans-serif; text-align: center; padding: 20px; }
-    #circle {
-      margin: 20px auto;
-      width: 150px; height: 150px;
-      border-radius: 50%;
-      background: #ccc;
-      transition: background 0.1s ease;
-    }
-    .controls { margin: 20px 0; }
-    label { display: block; margin-top: 10px; }
-  </style>
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <h1>Metronome</h1>
-  
-  <!-- 圓圈視覺化 -->
-  <div id="circle"></div>
-  
+
+  <div id="circle" class="circle"></div>
+
   <div class="controls">
     <label>
-      BPM: <input type="range" id="bpm" min="30" max="240" value="120">
+      BPM:
+      <input id="bpm" type="range" min="30" max="240" value="120">
       <span id="bpmValue">120</span>
     </label>
+
     <label>
-      Beats per Measure: 
-      <input type="number" id="beatsPerMeasure" min="0" max="12" value="0">
+      每小節拍數:
+      <select id="beatsPerMeasure">
+        <option value="0">無</option>
+        <option value="2">2</option>
+        <option value="3">3</option>
+        <option value="4" selected>4</option>
+      </select>
     </label>
-    <button id="startBtn">Start</button>
-    <button id="stopBtn">Stop</button>
+
+    <div style="margin-top:8px;">
+      <button id="startBtn">Start</button>
+      <button id="stopBtn">Stop</button>
+    </div>
   </div>
 
   <hr/>
-  <h2>Sync Options</h2>
-  <button id="leaderBtn">Start as Leader</button>
-  <button id="followerBtn">Join as Follower</button>
+
+  <div>
+    <button id="leaderBtn">Start as Leader</button>
+    <label style="margin-left:10px;"><input id="allowChanges" type="checkbox"> 允許 followers 修改節拍</label>
+    <button id="followerBtn" style="margin-left:10px;">Join as Follower</button>
+  </div>
+
+  <div id="leaderList" style="margin-top:12px;"></div>
+
+  <div id="debug" style="text-align:left; max-width:720px; margin:16px auto; background:#f3f4f6; color:#111; padding:10px; border-radius:6px;">
+    <strong>Debug（ms）</strong><br>
+    本機時間: <span id="dbgLocal">-</span><br>
+    最後 offset (server - local): <span id="dbgOffset">-</span><br>
+    last delay RTT: <span id="dbgDelay">-</span><br>
+    leader startTime: <span id="dbgLeaderStart">-</span><br>
+    current beat index: <span id="dbgBeat">-</span>
+  </div>
 
   <script src="metronome.js"></script>
 </body>
