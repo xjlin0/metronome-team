@@ -10,6 +10,7 @@
     video { width: 300px; height: auto; margin-top: 10px; }
     canvas { display: none; }
     #qrCanvas { margin-top: 10px; }
+    #leaderList button { display: block; margin: 5px auto; }
   </style>
 </head>
 <body>
@@ -20,10 +21,11 @@
     <button id="becomeFollower">成為 Follower</button>
   </div>
 
+  <!-- Leader UI -->
   <div id="leaderUI" style="display:none;">
     <h2>Leader 模式</h2>
     <label>BPM: <input type="number" id="bpm" value="120" min="30" max="300"></label><br>
-    <label>每小節拍數: 
+    <label>每小節拍數:
       <select id="beatsPerMeasure">
         <option value="0">無 (全部相同)</option>
         <option value="3">3</option>
@@ -36,11 +38,14 @@
     <div id="qrCanvas"></div>
   </div>
 
+  <!-- Follower UI -->
   <div id="followerUI" style="display:none;">
     <h2>Follower 模式</h2>
     <button id="scanBLE">掃描附近的 Leader (BLE)</button>
-    <button id="scanQR">用相機掃描 QR Code</button>
     <div id="bleStatus"></div>
+    <div id="leaderList"></div>
+    <hr>
+    <button id="scanQR">📷 用相機掃描 QR Code</button>
     <video id="qrVideo" autoplay></video>
     <canvas id="qrCanvasHidden"></canvas>
   </div>
@@ -56,6 +61,7 @@
     let bpm = 120;
     let beatsPerMeasure = 4;
     let audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const SERVICE_UUID = "12345678-1234-5678-1234-56789abcdef0"; // 自訂 UUID
 
     // Leader 預設名稱
     document.getElementById("leaderName").value = "節拍器" + Math.random().toString(36).substring(2,4);
@@ -99,7 +105,8 @@
         qrDiv.appendChild(canvas);
       });
 
-      // TODO: BLE 廣播（需要 PWA + HTTPS）
+      // 嘗試 BLE 廣播
+      advertiseBLE(session);
     }
 
     function stopMetronome() {
@@ -122,17 +129,46 @@
     document.getElementById("start").onclick = startMetronome;
     document.getElementById("stop").onclick = stopMetronome;
 
+    // ====== Leader: BLE 廣播 (部分瀏覽器需開 flag) ======
+    async function advertiseBLE(session) {
+      if (!navigator.bluetooth || !navigator.bluetooth.requestDevice) {
+        console.log("此瀏覽器不支援 BLE 廣播");
+        return;
+      }
+      try {
+        // ⚠️ Web Bluetooth 還不支持正式廣播 API，只能透過 GATT 服務間接方式
+        const advData = new TextEncoder().encode(JSON.stringify(session));
+        const adv = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: [SERVICE_UUID]
+        });
+        console.log("已開始 BLE 廣播 (模擬):", advData);
+      } catch (e) {
+        console.error("BLE 廣播失敗:", e);
+      }
+    }
+
     // ====== Follower: BLE 掃描 ======
     document.getElementById("scanBLE").onclick = async () => {
       if (!("bluetooth" in navigator) || !navigator.bluetooth.requestLEScan) {
         document.getElementById("bleStatus").innerHTML =
-          "此瀏覽器不支援 BLE 掃描，請使用 Android Chrome 並在 <a href='chrome://flags/#experimental-web-platform-features'>chrome://flags/#experimental-web-platform-features</a> 開啟功能";
+          "此瀏覽器不支援 BLE 掃描。請改用 QR Code，或在 Android Chrome 打開 👉 " +
+          "<a href='chrome://flags/#enable-experimental-web-platform-features'>chrome://flags/#enable-experimental-web-platform-features</a>";
         return;
       }
       try {
         const scan = await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements: true });
         document.getElementById("bleStatus").textContent = "正在掃描附近的 Leader...";
-        // TODO: 解析廣播資料
+        navigator.bluetooth.addEventListener('advertisementreceived', event => {
+          const advText = new TextDecoder().decode(event.manufacturerData.get(0xFFFF));
+          try {
+            const session = JSON.parse(advText);
+            let btn = document.createElement("button");
+            btn.textContent = `${session.name} (BPM ${session.bpm})`;
+            btn.onclick = () => startFollower(session);
+            document.getElementById("leaderList").appendChild(btn);
+          } catch {}
+        });
       } catch (e) {
         document.getElementById("bleStatus").textContent = "掃描失敗: " + e;
       }
