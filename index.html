@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>同步節拍器 MVP</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; padding: 20px; }
+    .beat { width: 50px; height: 50px; margin: 20px auto; border-radius: 50%; background: #ccc; transition: background 0.1s, transform 0.1s; }
+    .beat.active { background: #4caf50; transform: scale(1.3); }
+    .beat.strong { background: #ff5722 !important; }
+    #qr { margin: 20px; }
+    input, button, select { margin: 5px; padding: 5px; font-size: 16px; }
+    #leadersList { margin-top: 20px; }
+    #leadersList button { display: block; margin: 5px auto; }
+  </style>
+</head>
+<body>
+  <h1>同步節拍器 MVP</h1>
+
+  <div>
+    <label>Leader 名稱: <input id="leaderName"></label><br>
+    <label>BPM: <input type="range" id="bpm" min="30" max="240" value="120">
+      <span id="bpmVal">120</span></label><br>
+    <label>每小節拍數: 
+      <select id="beatsPerBar">
+        <option value="0">無強拍</option>
+        <option value="2">2</option>
+        <option value="3">3</option>
+        <option value="4" selected>4</option>
+        <option value="6">6</option>
+      </select>
+    </label><br>
+    <button id="startBtn">開始/停止</button>
+  </div>
+
+  <div class="beat" id="beatCircle"></div>
+
+  <div id="qr"></div>
+
+  <button id="scanBtn">掃描附近 Leader (BLE)</button>
+  <div id="leadersList"></div>
+  <p id="bleStatus"></p>
+
+  <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+  <script>
+    // ------------------------------
+    // Utility: 生成 Leader 預設名稱
+    // ------------------------------
+    function randomSuffix() {
+      const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+      return chars[Math.floor(Math.random() * chars.length)] +
+             chars[Math.floor(Math.random() * chars.length)];
+    }
+    const leaderNameInput = document.getElementById("leaderName");
+    leaderNameInput.value = "節拍器-" + randomSuffix();
+
+    // ------------------------------
+    // Metronome state
+    // ------------------------------
+    let bpm = 120;
+    let beatsPerBar = 4;
+    let isRunning = false;
+    let beatCount = 0;
+    let audioCtx = null;
+    let nextNoteTime = 0;
+    let timerID = null;
+
+    const bpmSlider = document.getElementById("bpm");
+    const bpmVal = document.getElementById("bpmVal");
+    const beatsPerBarSelect = document.getElementById("beatsPerBar");
+    const beatCircle = document.getElementById("beatCircle");
+
+    bpmSlider.addEventListener("input", () => {
+      bpm = parseInt(bpmSlider.value);
+      bpmVal.textContent = bpm;
+      updateBroadcast();
+    });
+    beatsPerBarSelect.addEventListener("change", () => {
+      beatsPerBar = parseInt(beatsPerBarSelect.value);
+      updateBroadcast();
+    });
+
+    document.getElementById("startBtn").onclick = () => {
+      if (isRunning) stopMetronome(); else startMetronome();
+    };
+
+    function startMetronome() {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      isRunning = true;
+      beatCount = 0;
+      nextNoteTime = audioCtx.currentTime;
+      scheduler();
+    }
+
+    function stopMetronome() {
+      isRunning = false;
+      if (timerID) clearTimeout(timerID);
+      beatCircle.classList.remove("active", "strong");
+    }
+
+    function scheduler() {
+      while (nextNoteTime < audioCtx.currentTime + 0.1) {
+        scheduleNote(beatCount, nextNoteTime);
+        nextNoteTime += 60.0 / bpm;
+        beatCount++;
+      }
+      timerID = setTimeout(scheduler, 25);
+    }
+
+    function scheduleNote(beatNumber, time) {
+      const osc = audioCtx.createOscillator();
+      const envelope = audioCtx.createGain();
+      osc.connect(envelope).connect(audioCtx.destination);
+      if (beatsPerBar > 0 && beatNumber % beatsPerBar === 0) {
+        osc.frequency.value = 880; // 強拍: 高音
+      } else {
+        osc.frequency.value = 440; // 弱拍: 低音
+      }
+      envelope.gain.setValueAtTime(1, time);
+      envelope.gain.exponentialRampToValueAtTime(0.001, time + 0.05);
+      osc.start(time);
+      osc.stop(time + 0.05);
+
+      // 視覺化
+      setTimeout(() => {
+        beatCircle.classList.add("active");
+        if (beatsPerBar > 0 && beatNumber % beatsPerBar === 0) {
+          beatCircle.classList.add("strong");
+        } else {
+          beatCircle.classList.remove("strong");
+        }
+      }, (time - audioCtx.currentTime) * 1000);
+      setTimeout(() => beatCircle.classList.remove("active"), (time - audioCtx.currentTime) * 1000 + 100);
+    }
+
+    // ------------------------------
+    // Session broadcast (QR + BLE)
+    // ------------------------------
+    function updateBroadcast() {
+      const session = {
+        leader: leaderNameInput.value,
+        bpm: bpm,
+        beatsPerBar: beatsPerBar,
+        referenceTime: Date.now()
+      };
+      const sessionStr = JSON.stringify(session);
+      QRCode.toCanvas(document.createElement("canvas"), sessionStr, { width: 200 }, (err, canvas) => {
+        const qrDiv = document.getElementById("qr");
+        qrDiv.innerHTML = "";
+        qrDiv.appendChild(canvas);
+      });
+
+      // 更新 BLE 廣播 (僅 Android Chrome + flag)
+      if (navigator.bluetooth && navigator.bluetooth.requestLEScan) {
+        // 這裡理論上要用 Web Bluetooth Advertiser API (還未普遍可用)
+        // 暫時用 console 模擬
+        console.log("Would broadcast via BLE:", session);
+      }
+    }
+    updateBroadcast();
+
+    // ------------------------------
+    // BLE Scan
+    // ------------------------------
+    document.getElementById("scanBtn").onclick = async () => {
+      if (!navigator.bluetooth || !navigator.bluetooth.requestLEScan) {
+        document.getElementById("bleStatus").textContent =
+          "此瀏覽器不支援 BLE 掃描。請用 Android Chrome 並在 chrome://flags/#experimental-web-platform-features 打開實驗功能。";
+        return;
+      }
+      try {
+        const scan = await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements: true });
+        document.getElementById("bleStatus").textContent = "掃描中...";
+        navigator.bluetooth.addEventListener('advertisementreceived', event => {
+          console.log("BLE 廣告:", event);
+          // 理想狀況：解析 event.manufacturerData / serviceData 拿到 session JSON
+          // 這裡因為受限 API，我們只能展示 event 資訊
+        });
+      } catch (e) {
+        document.getElementById("bleStatus").textContent = "掃描失敗: " + e;
+      }
+    };
+  </script>
+</body>
+</html>
