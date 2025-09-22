@@ -1,43 +1,29 @@
-import { kv } from "@vercel/kv";
+let leaders = {};
 
 export default async function handler(req, res) {
   if (req.method === "POST") {
-    const { id, tempo, allowChanges } = req.body;
-    const leaderData = {
+    const { bpm, beatsPerMeasure } = req.body;
+    const id = Math.random().toString(36).substr(2, 5);
+    leaders[id] = {
       id,
-      tempo,
-      allowChanges,
-      createdAt: Date.now(),
+      bpm,
+      beatsPerMeasure,
+      startTime: Date.now() + 1000, // 給1秒準備時間
+      created: Date.now()
     };
-    await kv.set(`leader:${id}`, leaderData, { ex: 7200 }); // TTL 2h
-    return res.json(leaderData);
-  }
-
-  if (req.method === "GET") {
-    const keys = await kv.keys("leader:*");
-    const leaders = [];
-    for (const key of keys) {
-      const leader = await kv.get(key);
-      if (leader) leaders.push(leader);
-    }
-    return res.json(leaders);
-  }
-
-  if (req.method === "PUT") {
-    const { id, tempo } = req.body;
-    const leader = await kv.get(`leader:${id}`);
-    if (!leader) return res.status(404).json({ error: "Not found" });
-
-    if (leader.allowChanges) {
-      leader.tempo = tempo;
-      leader.updatedAt = Date.now();
-      await kv.set(`leader:${id}`, leader, { ex: 7200 });
-      return res.json(leader);
+    res.json(leaders[id]);
+  } else if (req.method === "GET") {
+    if (req.query.id) {
+      res.json(leaders[req.query.id]);
     } else {
-      return res.status(403).json({ error: "Changes not allowed" });
+      // 移除超過2小時的
+      const now = Date.now();
+      leaders = Object.fromEntries(
+        Object.entries(leaders).filter(([_, l]) => now - l.created < 7200000)
+      );
+      res.json(Object.values(leaders));
     }
+  } else {
+    res.status(405).end();
   }
-
-  res.status(405).json({ error: "Method not allowed" });
 }
-

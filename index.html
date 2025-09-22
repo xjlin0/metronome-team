@@ -1,81 +1,46 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Metronome Sync Demo</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Metronome Sync</title>
   <style>
-    body { font-family: sans-serif; text-align: center; }
-    #circle { width: 150px; height: 150px; border-radius: 50%; background: lightblue; margin: 50px auto; }
+    body { font-family: sans-serif; text-align: center; padding: 20px; }
+    #circle {
+      margin: 20px auto;
+      width: 150px; height: 150px;
+      border-radius: 50%;
+      background: #ccc;
+      transition: background 0.1s ease;
+    }
+    .controls { margin: 20px 0; }
+    label { display: block; margin-top: 10px; }
   </style>
 </head>
 <body>
-  <h1>Metronome Sync Demo</h1>
+  <h1>Metronome</h1>
+  
+  <!-- 圓圈視覺化 -->
   <div id="circle"></div>
-  <p id="tempo">Tempo: --</p>
-  <button id="be-leader">Start as Leader</button>
-  <button id="join">Join as Follower</button>
+  
+  <div class="controls">
+    <label>
+      BPM: <input type="range" id="bpm" min="30" max="240" value="120">
+      <span id="bpmValue">120</span>
+    </label>
+    <label>
+      Beats per Measure: 
+      <input type="number" id="beatsPerMeasure" min="0" max="12" value="0">
+    </label>
+    <button id="startBtn">Start</button>
+    <button id="stopBtn">Stop</button>
+  </div>
 
-  <script>
-    let tempo = 100;
-    let isLeader = false;
-    let peer, channel;
-    let interval;
+  <hr/>
+  <h2>Sync Options</h2>
+  <button id="leaderBtn">Start as Leader</button>
+  <button id="followerBtn">Join as Follower</button>
 
-    async function timeSync() {
-      let samples = [];
-      for (let i=0; i<5; i++) {
-        const t0 = Date.now();
-        const res = await fetch("/api/timesync", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ clientTime: t0 }),
-        });
-        const { clientTime, serverTime } = await res.json();
-        const t1 = Date.now();
-        const rtt = t1 - clientTime;
-        const oneWay = rtt/2;
-        const offset = (serverTime + oneWay) - t1;
-        samples.push(offset);
-      }
-      samples.sort((a,b)=>a-b);
-      return samples[Math.floor(samples.length/2)];
-    }
-
-    function startMetronome() {
-      const circle = document.getElementById("circle");
-      let beat = false;
-      if (interval) clearInterval(interval);
-      interval = setInterval(()=>{
-        beat = !beat;
-        circle.style.background = beat ? "lightblue" : "lightgreen";
-        new AudioContext().createOscillator().start(); // 簡單 click
-      }, 60000/tempo);
-    }
-
-    document.getElementById("be-leader").onclick = async ()=>{
-      isLeader = true;
-      tempo = 120;
-      document.getElementById("tempo").innerText = `Tempo: ${tempo}`;
-      startMetronome();
-      await fetch("/api/leaders", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: "demo", tempo, allowChanges: true }),
-      });
-    };
-
-    document.getElementById("join").onclick = async ()=>{
-      const offset = await timeSync();
-      console.log("offset", offset);
-      const res = await fetch("/api/leaders");
-      const leaders = await res.json();
-      if (leaders.length) {
-        tempo = leaders[0].tempo;
-        document.getElementById("tempo").innerText = `Tempo: ${tempo}`;
-        startMetronome();
-      }
-    };
-  </script>
+  <script src="metronome.js"></script>
 </body>
 </html>
-
