@@ -1,23 +1,34 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Metronome</title>
-  <link rel="stylesheet" href="style.css">
+<meta charset="UTF-8">
+<title>Metronome Team</title>
+<style>
+#circle { width:100px; height:100px; border-radius:50%; background:hsl(200,70%,50%); margin:20px auto; }
+.controls { display:flex; flex-direction:column; align-items:center; }
+.controls label { margin:5px; }
+</style>
 </head>
 <body>
-  <h1>Metronome</h1>
-
-  <div>
-    BPM: <input id="bpm" type="number" value="120" min="30" max="300">
-    Beats per measure: <input id="beats" type="number" value="4" min="1" max="16">
-  </div>
-
+<div class="controls">
+  <label>
+    Leader Label: <input type="text" id="leaderLabel" value="Beat-ABCD">
+  </label>
+  <label>
+    BPM: <input type="number" id="bpm" value="120" min="20" max="300">
+  </label>
+  <label>
+    Beats per measure: <input type="number" id="beats" value="0" min="0" max="12">
+  </label>
+  <label>
+    <input type="checkbox" id="sound" checked> Sound
+  </label>
+  <button id="startBtn">Start</button>
+  <button id="stopBtn">Stop</button>
   <button id="startLeader">Start as Leader</button>
   <button id="joinFollower">Join as Follower</button>
-
-  <div id="circle" style="width:100px;height:100px;border-radius:50%;background:hsl(200,70%,50%);margin:50px auto;"></div>
-
-  <script src="metronome.js"></script>
+</div>
+<div id="circle"></div>
+<script src="metronome.js"></script>
 </body>
 </html>
