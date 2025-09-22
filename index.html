@@ -2,199 +2,167 @@
 <html lang="zh">
 <head>
   <meta charset="UTF-8">
-  <title>多人節拍器 MVP</title>
+  <title>多人同步節拍器 MVP</title>
   <style>
-    body { font-family: sans-serif; text-align: center; padding: 20px; }
-    #beat { font-size: 48px; margin-top: 20px; }
-    .highlight { color: red; font-weight: bold; }
-    video { width: 300px; height: auto; margin-top: 10px; }
-    canvas { display: none; }
-    #qrCanvas { margin-top: 10px; }
-    #leaderList button { display: block; margin: 5px auto; }
+    body { font-family: sans-serif; text-align: center; padding: 20px; background:#222; color:#fff; }
+    #controls { margin-top: 20px; }
+    #beatCircle {
+      width: 150px; height: 150px; margin: 30px auto;
+      border-radius: 50%; background: #444;
+      transition: background 0.1s ease;
+    }
+    #qrCanvas, #qrVideo { margin-top: 20px; }
+    video { width: 300px; height: auto; border:2px solid #666; }
+    button { margin:5px; padding:10px 20px; font-size:16px; }
+    input[type=range] { width:200px; }
   </style>
 </head>
 <body>
-  <h1>多人節拍器 MVP</h1>
+  <h1>多人同步節拍器 MVP</h1>
 
-  <div>
-    <button id="becomeLeader">成為 Leader</button>
-    <button id="becomeFollower">成為 Follower</button>
-  </div>
-
-  <!-- Leader UI -->
-  <div id="leaderUI" style="display:none;">
-    <h2>Leader 模式</h2>
-    <label>BPM: <input type="number" id="bpm" value="120" min="30" max="300"></label><br>
+  <!-- 節拍器控制區 -->
+  <div id="controls">
+    <label>BPM: <input type="range" id="bpm" min="40" max="240" value="120">
+      <span id="bpmVal">120</span></label><br>
     <label>每小節拍數:
       <select id="beatsPerMeasure">
-        <option value="0">無 (全部相同)</option>
+        <option value="0">無</option>
         <option value="3">3</option>
         <option value="4" selected>4</option>
       </select>
     </label><br>
-    <label>Leader 名稱: <input type="text" id="leaderName"></label><br>
-    <button id="start">開始打拍</button>
-    <button id="stop">停止</button>
+    <button id="startBtn">開始</button>
+    <button id="stopBtn">停止</button>
+  </div>
+
+  <!-- 視覺化圓圈 -->
+  <div id="beatCircle"></div>
+
+  <!-- 模式選擇 -->
+  <div>
+    <button id="beLeader">成為 Leader</button>
+    <button id="beFollower">成為 Follower</button>
+  </div>
+
+  <!-- Leader UI -->
+  <div id="leaderUI" style="display:none;">
+    <h3>Leader 模式</h3>
     <div id="qrCanvas"></div>
   </div>
 
   <!-- Follower UI -->
   <div id="followerUI" style="display:none;">
-    <h2>Follower 模式</h2>
-    <button id="scanBLE">掃描附近的 Leader (BLE)</button>
-    <div id="bleStatus"></div>
-    <div id="leaderList"></div>
-    <hr>
-    <button id="scanQR">📷 用相機掃描 QR Code</button>
+    <h3>Follower 模式</h3>
+    <button id="scanQR">📷 掃描 Leader 的 QR Code</button>
+    <button id="cancelScan" style="display:none;">取消</button>
     <video id="qrVideo" autoplay></video>
     <canvas id="qrCanvasHidden"></canvas>
   </div>
 
-  <div id="beat"></div>
-
   <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jsqr/dist/jsQR.js"></script>
   <script>
-    let isLeader = false;
-    let beatInterval;
-    let startTime;
     let bpm = 120;
     let beatsPerMeasure = 4;
+    let beatInterval;
+    let beatCount = 0;
     let audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const SERVICE_UUID = "12345678-1234-5678-1234-56789abcdef0"; // 自訂 UUID
 
-    // Leader 預設名稱
-    document.getElementById("leaderName").value = "節拍器" + Math.random().toString(36).substring(2,4);
+    const circle = document.getElementById("beatCircle");
+    const bpmSlider = document.getElementById("bpm");
+    const bpmVal = document.getElementById("bpmVal");
+
+    bpmSlider.oninput = () => {
+      bpm = parseInt(bpmSlider.value);
+      bpmVal.textContent = bpm;
+      if (isLeader) updateQRCode();
+    };
+
+    document.getElementById("beatsPerMeasure").onchange = (e) => {
+      beatsPerMeasure = parseInt(e.target.value);
+      if (isLeader) updateQRCode();
+    };
 
     function playClick(isAccent) {
       let osc = audioCtx.createOscillator();
-      let envelope = audioCtx.createGain();
-      osc.connect(envelope).connect(audioCtx.destination);
+      let env = audioCtx.createGain();
+      osc.connect(env).connect(audioCtx.destination);
       osc.frequency.value = isAccent ? 1000 : 800;
-      envelope.gain.setValueAtTime(1, audioCtx.currentTime);
-      envelope.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
-      osc.start(audioCtx.currentTime);
-      osc.stop(audioCtx.currentTime + 0.2);
+      env.gain.setValueAtTime(1, audioCtx.currentTime);
+      env.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+      osc.start(); osc.stop(audioCtx.currentTime + 0.2);
     }
 
     function startMetronome() {
-      bpm = parseInt(document.getElementById("bpm").value);
-      beatsPerMeasure = parseInt(document.getElementById("beatsPerMeasure").value);
-      startTime = Date.now();
-
       clearInterval(beatInterval);
       let intervalMs = 60000 / bpm;
-      let beatCount = 0;
-
+      beatCount = 0;
       beatInterval = setInterval(() => {
-        let isAccent = (beatsPerMeasure > 0) && (beatCount % beatsPerMeasure === 0);
+        let isAccent = beatsPerMeasure > 0 && (beatCount % beatsPerMeasure === 0);
         playClick(isAccent);
-        document.getElementById("beat").textContent = isAccent ? "叮" : "噹";
-        document.getElementById("beat").className = isAccent ? "highlight" : "";
+        circle.style.background = isAccent ? "#ff5555" : "#55aaff";
         beatCount++;
       }, intervalMs);
-
-      // 更新 QR code
-      let session = {
-        name: document.getElementById("leaderName").value,
-        bpm, beatsPerMeasure, startTime
-      };
-      QRCode.toCanvas(document.createElement("canvas"), JSON.stringify(session), (err, canvas) => {
-        let qrDiv = document.getElementById("qrCanvas");
-        qrDiv.innerHTML = "";
-        qrDiv.appendChild(canvas);
-      });
-
-      // 嘗試 BLE 廣播
-      advertiseBLE(session);
     }
 
     function stopMetronome() {
       clearInterval(beatInterval);
-      document.getElementById("beat").textContent = "";
+      circle.style.background = "#444";
     }
 
-    document.getElementById("becomeLeader").onclick = () => {
+    document.getElementById("startBtn").onclick = startMetronome;
+    document.getElementById("stopBtn").onclick = stopMetronome;
+
+    // Leader / Follower 切換
+    let isLeader = false;
+    document.getElementById("beLeader").onclick = () => {
       isLeader = true;
       document.getElementById("leaderUI").style.display = "block";
-      document.getElementById("followerUI").style.display = "none";
+      updateQRCode();
     };
 
-    document.getElementById("becomeFollower").onclick = () => {
+    document.getElementById("beFollower").onclick = () => {
       isLeader = false;
-      document.getElementById("leaderUI").style.display = "none";
       document.getElementById("followerUI").style.display = "block";
     };
 
-    document.getElementById("start").onclick = startMetronome;
-    document.getElementById("stop").onclick = stopMetronome;
-
-    // ====== Leader: BLE 廣播 (部分瀏覽器需開 flag) ======
-    async function advertiseBLE(session) {
-      if (!navigator.bluetooth || !navigator.bluetooth.requestDevice) {
-        console.log("此瀏覽器不支援 BLE 廣播");
-        return;
-      }
-      try {
-        // ⚠️ Web Bluetooth 還不支持正式廣播 API，只能透過 GATT 服務間接方式
-        const advData = new TextEncoder().encode(JSON.stringify(session));
-        const adv = await navigator.bluetooth.requestDevice({
-          acceptAllDevices: true,
-          optionalServices: [SERVICE_UUID]
-        });
-        console.log("已開始 BLE 廣播 (模擬):", advData);
-      } catch (e) {
-        console.error("BLE 廣播失敗:", e);
-      }
+    // Leader QR code
+    function updateQRCode() {
+      let session = {
+        name: "節拍器" + Math.random().toString(36).substring(2,4),
+        bpm, beatsPerMeasure, startTime: Date.now()
+      };
+      QRCode.toCanvas(JSON.stringify(session), { width: 200 }, (err, canvas) => {
+        let qrDiv = document.getElementById("qrCanvas");
+        qrDiv.innerHTML = "";
+        qrDiv.appendChild(canvas);
+      });
     }
 
-    // ====== Follower: BLE 掃描 ======
-    document.getElementById("scanBLE").onclick = async () => {
-      if (!("bluetooth" in navigator) || !navigator.bluetooth.requestLEScan) {
-        document.getElementById("bleStatus").innerHTML =
-          "此瀏覽器不支援 BLE 掃描。請改用 QR Code，或在 Android Chrome 打開 👉 " +
-          "<a href='chrome://flags/#enable-experimental-web-platform-features'>chrome://flags/#enable-experimental-web-platform-features</a>";
-        return;
-      }
-      try {
-        const scan = await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements: true });
-        document.getElementById("bleStatus").textContent = "正在掃描附近的 Leader...";
-        navigator.bluetooth.addEventListener('advertisementreceived', event => {
-          const advText = new TextDecoder().decode(event.manufacturerData.get(0xFFFF));
-          try {
-            const session = JSON.parse(advText);
-            let btn = document.createElement("button");
-            btn.textContent = `${session.name} (BPM ${session.bpm})`;
-            btn.onclick = () => startFollower(session);
-            document.getElementById("leaderList").appendChild(btn);
-          } catch {}
-        });
-      } catch (e) {
-        document.getElementById("bleStatus").textContent = "掃描失敗: " + e;
-      }
-    };
+    // Follower QR scan
+    const scanBtn = document.getElementById("scanQR");
+    const cancelBtn = document.getElementById("cancelScan");
+    const video = document.getElementById("qrVideo");
+    const canvas = document.getElementById("qrCanvasHidden");
+    const ctx = canvas.getContext("2d");
 
-    // ====== Follower: QR 掃描 ======
-    document.getElementById("scanQR").onclick = () => {
-      let video = document.getElementById("qrVideo");
-      let canvas = document.getElementById("qrCanvasHidden");
-      let ctx = canvas.getContext("2d");
-
+    scanBtn.onclick = () => {
       navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
         .then(stream => {
           video.srcObject = stream;
+          scanBtn.style.display = "none";
+          cancelBtn.style.display = "inline-block";
           function tick() {
             if (video.readyState === video.HAVE_ENOUGH_DATA) {
               canvas.width = video.videoWidth;
               canvas.height = video.videoHeight;
               ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-              let imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-              let code = jsQR(imageData.data, canvas.width, canvas.height);
+              let imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              let code = jsQR(imgData.data, canvas.width, canvas.height);
               if (code) {
                 let session = JSON.parse(code.data);
-                startFollower(session);
-                stream.getTracks().forEach(track => track.stop());
-                video.srcObject = null;
+                joinLeader(session);
+                stopStream();
               }
             }
             requestAnimationFrame(tick);
@@ -203,20 +171,22 @@
         });
     };
 
-    function startFollower(session) {
+    cancelBtn.onclick = stopStream;
+    function stopStream() {
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach(t => t.stop());
+        video.srcObject = null;
+      }
+      scanBtn.style.display = "inline-block";
+      cancelBtn.style.display = "none";
+    }
+
+    function joinLeader(session) {
       bpm = session.bpm;
       beatsPerMeasure = session.beatsPerMeasure;
-      let intervalMs = 60000 / bpm;
-      let beatCount = 0;
-
-      clearInterval(beatInterval);
-      beatInterval = setInterval(() => {
-        let isAccent = (beatsPerMeasure > 0) && (beatCount % beatsPerMeasure === 0);
-        playClick(isAccent);
-        document.getElementById("beat").textContent = isAccent ? "叮" : "噹";
-        document.getElementById("beat").className = isAccent ? "highlight" : "";
-        beatCount++;
-      }, intervalMs);
+      bpmSlider.value = bpm;
+      bpmVal.textContent = bpm;
+      startMetronome();
     }
   </script>
 </body>
