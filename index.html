@@ -18,8 +18,17 @@
       <label>BPM: <span id="bpmVal">120</span></label>
       <input id="bpm" type="range" min="30" max="300" value="120" />
 
-      <label>每小節幾拍 (0 = 無強拍):
-        <input id="beatsPerMeasure" type="number" min="0" max="64" value="0" />
+      <label>每小節幾拍:
+        <select id="beatsPerMeasure">
+          <option value="0">0 (無強拍)</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4" selected>4</option>
+          <option value="5">5</option>
+          <option value="6">6</option>
+          <option value="7">7</option>
+          <option value="8">8</option>
+        </select>
       </label>
 
       <label class="row">
