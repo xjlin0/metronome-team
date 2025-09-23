@@ -46,7 +46,7 @@ h1{ text-align:center; margin-bottom:8px;}
 .segment{
   height:100%;
   background:#eee;
-  transition: background 0.12s ease, flex-basis 0.12s ease;
+  transition: background 0.2s ease, flex-basis 0.12s ease, transform 0.12s ease;
   display:inline-block;
   flex:1 1 0%;
   margin:0;
@@ -55,9 +55,17 @@ h1{ text-align:center; margin-bottom:8px;}
 .segment.active{
   background: linear-gradient(90deg, #ff8a65, #ffd740);
   box-shadow: inset 0 -6px 12px rgba(0,0,0,0.06);
+  transform: scaleY(1.02);
 }
 /* single bar when beatsPerMeasure==0 */
-.segment.flash{ background: linear-gradient(90deg,#81d4fa,#4fc3f7); }
+.segment.flash{ 
+  background: linear-gradient(90deg,#81d4fa,#4fc3f7);
+  transition: background 0.3s ease, transform 0.3s ease;
+}
+.segment.flash.active {
+  transform: scaleY(1.06);
+  background: linear-gradient(90deg,#4fc3f7,#29b6f6);
+}
 
 /* debug */
 .debug{ margin-top:12px; background:#fff; border:1px solid #eee; padding:8px; border-radius:6px; font-size:13px; color:#333; }
