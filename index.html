@@ -1,34 +1,70 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-TW">
 <head>
-<meta charset="UTF-8">
-<title>Metronome Team</title>
-<style>
-#circle { width:100px; height:100px; border-radius:50%; background:hsl(200,70%,50%); margin:20px auto; }
-.controls { display:flex; flex-direction:column; align-items:center; }
-.controls label { margin:5px; }
-</style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>同步節拍器 MVP</title>
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    body{font-family:Arial,Helvetica,sans-serif;padding:16px;text-align:center;}
+    .controls{max-width:720px;margin:0 auto;text-align:left;}
+    label{display:block;margin:8px 0;}
+    #circle{width:160px;height:160px;border-radius:50%;background:#ccc;margin:18px auto;transition:all 0.12s ease;}
+    .small{font-size:14px;color:#666}
+    #leaderSelect{width:100%}
+    #debug{background:#fafafa;border:1px solid #eee;padding:8px;margin-top:12px;}
+  </style>
 </head>
 <body>
-<div class="controls">
-  <label>
-    Leader Label: <input type="text" id="leaderLabel" value="Beat-ABCD">
-  </label>
-  <label>
-    BPM: <input type="number" id="bpm" value="120" min="20" max="300">
-  </label>
-  <label>
-    Beats per measure: <input type="number" id="beats" value="0" min="0" max="12">
-  </label>
-  <label>
-    <input type="checkbox" id="sound" checked> Sound
-  </label>
-  <button id="startBtn">Start</button>
-  <button id="stopBtn">Stop</button>
-  <button id="startLeader">Start as Leader</button>
-  <button id="joinFollower">Join as Follower</button>
-</div>
-<div id="circle"></div>
-<script src="metronome.js"></script>
+  <h1>同步節拍器 MVP</h1>
+
+  <div class="controls">
+    <label>Leader Label（顯示給其他人看；可改）:
+      <input id="leaderLabel" type="text" style="width:100%" />
+    </label>
+
+    <label>BPM:
+      <input id="bpm" type="range" min="30" max="300" value="120" />
+      <span id="bpmVal">120</span>
+    </label>
+
+    <label>每小節幾拍 (0 = 無強拍):
+      <input id="beatsPerMeasure" type="number" min="0" max="32" value="0" style="width:80px" />
+    </label>
+
+    <label><input id="soundToggle" type="checkbox" checked /> 聲音</label>
+
+    <div style="margin-top:10px;">
+      <button id="startLocal">開始</button>
+      <button id="stopLocal">停止</button>
+    </div>
+
+    <hr />
+
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button id="startLeader">Start as Leader</button>
+      <label class="small" style="margin-left:8px;">允許 followers 修改:
+        <input id="allowChanges" type="checkbox" />
+      </label>
+    </div>
+
+    <div style="margin-top:8px;">
+      <label>加入現有 Leader:
+        <select id="leaderSelect"><option value="">(載入中...)</option></select>
+      </label>
+      <button id="joinLeaderBtn">Join as Follower</button>
+    </div>
+
+    <div id="circle"></div>
+
+    <div id="debug" class="small">
+      本機時間: <span id="dbgLocal">-</span><br/>
+      offset (ms): <span id="dbgOffset">-</span> &nbsp; medianDelay(ms): <span id="dbgDelay">-</span><br/>
+      leader startTime (server ms): <span id="dbgLeaderStart">-</span><br/>
+      current beat index: <span id="dbgBeat">-</span>
+    </div>
+  </div>
+
+  <script src="metronome.js"></script>
 </body>
 </html>
