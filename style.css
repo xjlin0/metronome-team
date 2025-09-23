@@ -1,24 +1,66 @@
-body {
-  font-family: sans-serif;
-  text-align: center;
-  padding: 20px;
+:root{
+  --accent: #ffd740;
+  --primary: #81d4fa;
+  --bg: #ffffff;
+  --muted: #666;
+  --panel: #fafafa;
 }
 
-#circle {
-  margin: 20px auto;
-  width: 150px;
-  height: 150px;
-  border-radius: 50%;
-  background: #ccc;
-  transition: background 0.1s ease;
+*{box-sizing:border-box}
+body{
+  font-family: Inter, system-ui, -apple-system, "Helvetica Neue", Arial;
+  background: var(--bg);
+  color:#111;
+  margin:0;
+  padding:18px;
+  display:flex;
+  justify-content:center;
+}
+.container{
+  width:100%;
+  max-width:920px;
+}
+h1{ text-align:center; margin-bottom:8px;}
+.controls{ background:var(--panel); padding:12px; border-radius:10px; box-shadow:0 2px 8px rgba(0,0,0,0.04); margin-bottom:14px;}
+.controls label{ display:block; margin:8px 0; font-size:14px; }
+.controls input[type="text"]{ width:100%; padding:8px; font-size:14px;}
+.controls input[type="number"]{ padding:6px; width:100px; }
+.row{ display:flex; gap:8px; align-items:center; margin-top:8px; }
+.row button{ padding:8px 12px; border-radius:8px; border:1px solid #ccc; background:#fff; cursor:pointer; }
+.small{ font-size:12px; color:var(--muted); margin-left:6px;}
+
+.visual{ margin-top:18px; text-align:center;}
+#beatVisual{
+  width:86%;
+  height:110px; /* bigger rectangle for distant visibility */
+  margin:12px auto;
+  border-radius:8px;
+  border:3px solid #222;
+  background:#e6e6e6;
+  display:flex;
+  align-items:center;
+  overflow:hidden;
 }
 
-.controls {
-  margin: 20px 0;
+/* segment base */
+.segment{
+  height:100%;
+  background:#eee;
+  transition: background 0.12s ease, flex-basis 0.12s ease;
+  display:inline-block;
+  flex:1 1 0%;
+  margin:0;
+  box-shadow: inset 0 -3px 6px rgba(0,0,0,0.03);
+}
+/* active */
+.segment.active{
+  background: linear-gradient(90deg, #ff8a65, #ffd740);
+  box-shadow: inset 0 -6px 12px rgba(0,0,0,0.06);
 }
 
-label {
-  display: block;
-  margin-top: 10px;
-}
+/* when not segmented (beatsPerMeasure==0) we show a single flashing bar */
+.segment.flash{ background: linear-gradient(90deg,#81d4fa,#4fc3f7); }
 
+/* debug */
+.debug{ margin-top:12px; background:#fff; border:1px solid #eee; padding:8px; border-radius:6px; font-size:13px; color:#333; }
+#dbgLocal,#dbgOffset,#dbgDelay,#dbgLeaderStart,#dbgBeat{ font-weight:600; }
