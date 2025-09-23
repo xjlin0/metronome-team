@@ -32,7 +32,7 @@ h1{ text-align:center; margin-bottom:8px;}
 .visual{ margin-top:18px; text-align:center;}
 #beatVisual{
   width:92%;
-  height:120px; /* larger for distance */
+  height:140px; /* larger for distance */
   margin:12px auto;
   border-radius:8px;
   border:3px solid #222;
@@ -46,25 +46,27 @@ h1{ text-align:center; margin-bottom:8px;}
 .segment{
   height:100%;
   background:#eee;
-  transition: background 0.2s ease, flex-basis 0.12s ease, transform 0.12s ease;
+  transition: background 0.18s ease, flex-basis 0.12s ease, transform 0.12s ease;
   display:inline-block;
   flex:1 1 0%;
   margin:0;
   box-shadow: inset 0 -3px 6px rgba(0,0,0,0.03);
 }
 .segment.active{
-  background: linear-gradient(90deg, #ff8a65, #ffd740);
+  background: linear-gradient(90deg, #ff7043, #ffd740);
   box-shadow: inset 0 -6px 12px rgba(0,0,0,0.06);
-  transform: scaleY(1.02);
+  transform: scaleY(1.03);
 }
 /* single bar when beatsPerMeasure==0 */
-.segment.flash{ 
-  background: linear-gradient(90deg,#81d4fa,#4fc3f7);
-  transition: background 0.3s ease, transform 0.3s ease;
+/* make dramatic color change for 0 mode: strong red flash */
+.segment.flash{
+  background: linear-gradient(90deg,#b3e5fc,#81d4fa);
+  transition: background 0.12s ease, transform 0.12s ease;
 }
 .segment.flash.active {
-  transform: scaleY(1.06);
-  background: linear-gradient(90deg,#4fc3f7,#29b6f6);
+  transform: scaleY(1.12);
+  background: linear-gradient(90deg,#ff5252,#ff1744); /* strong red */
+  box-shadow: inset 0 -8px 16px rgba(0,0,0,0.08);
 }
 
 /* debug */

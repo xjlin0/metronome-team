@@ -1,5 +1,5 @@
 // metronome.js
-// WebAudio multi-beat pre-schedule + DC ping/pong + timesync multi + join fixes
+// multi-beat pre-scheduling + dc ping/pong + timesync multi + join fixes + stronger 0 flash + debug logging
 (() => {
   const API_LEADERS = '/api/leaders';
   const API_TIMESYNC = '/api/timesync';
@@ -24,6 +24,7 @@
   const dbgDelay = document.getElementById('dbgDelay');
   const dbgLeaderStart = document.getElementById('dbgLeaderStart');
   const dbgBeat = document.getElementById('dbgBeat');
+  const debugLogEl = document.getElementById('debugLog');
 
   // state
   let audioCtx = null;
@@ -32,7 +33,8 @@
   let noteInterval = 60/120;  // seconds per beat
   let scheduleAheadTime = 1.2; // seconds to schedule ahead (multi-beat)
   let lookahead = 25;         // ms for scheduler tick
-  let beatNumber = 0;         // absolute beat count since leader start (or local start)
+  let nextBeatNumber = 0;     // absolute index of next beat to schedule
+  let lastPlayedBeatNumber = -1; // absolute index of last played beat (for visual)
   let scheduledBeats = new Set(); // avoid duplicate scheduling by beatNumber
   let bpm = Number(bpmRange.value || 120);
   let beatsPerMeasure = Number(beatsPerMeasureSel.value || 4);
@@ -40,17 +42,24 @@
   let isPlaying = false;
   let isLeader = false;
   let currentLeader = null;
-  let offsetMs = 0; // server - local (ms); initial baseline from timesyncMulti
+  let offsetMs = 0; // server - local (ms)
   let medianDelay = 0;
-  let leaderOffsetMs = 0; // if I'm leader, my offset to server
+  let leaderOffsetMs = 0; // leader's offset measured at leader device (server - leader_local)
 
   // WebRTC
   let pc = null;
   let dc = null;
   let leaderLabel = null;
   let dcPingInterval = null;
-  let lastDcPingTime = 0;
-  let lastDcPingResult = null;
+
+  // debug buffer
+  const debugLines = [];
+  function appendDebug(s) {
+    const t = new Date().toISOString().slice(11,23) + ' ' + s;
+    debugLines.push(t);
+    if (debugLines.length > 200) debugLines.shift();
+    debugLogEl.innerText = debugLines.slice().reverse().join('\n'); // newest first
+  }
 
   // utilities
   function randLabel(){
@@ -66,7 +75,6 @@
 
   function scheduleClick(audioTime, isAccent){
     ensureAudio();
-    // do not play if audio disabled
     if (!soundEnabled) return;
     try {
       const o = audioCtx.createOscillator();
@@ -111,9 +119,9 @@
     } else {
       const seg = segs[0];
       if (!seg) return;
-      // make flash more visible (longer)
+      // stronger flash: longer and bright red
       seg.classList.add('active');
-      setTimeout(() => seg.classList.remove('active'), 300);
+      setTimeout(()=> seg.classList.remove('active'), 300);
     }
   }
 
@@ -125,44 +133,43 @@
     return audioCtx.currentTime + dt;
   }
 
-  // scheduling loop (multi-beat pre-scheduling)
+  // scheduling loop (pre-schedule many beats)
   function schedulerTick(){
     if (!audioCtx) return;
-    // schedule beats up to scheduleAheadTime (seconds)
     while (nextNoteTime < audioCtx.currentTime + scheduleAheadTime) {
-      const bn = beatNumber;
+      const bn = nextBeatNumber;
       if (!scheduledBeats.has(bn)) {
-        // compute local epoch ms for this note
-        const localPlayMs = Date.now() + Math.round((nextNoteTime - audioCtx.currentTime) * 1000);
+        // compute local epoch ms for this note using mapping audioCtx -> Date.now
+        const localPlayMs = Date.now() + Math.round((nextNoteTime - audioCtx.currentTime)*1000);
+        const beatIdxForUI = bn; // absolute
         const isAccent = (beatsPerMeasure > 0) ? (bn % beatsPerMeasure === 0) : true;
 
         // schedule audio
         scheduleClick(nextNoteTime, isAccent && soundEnabled);
-        // schedule visual
+        // schedule visual at play time
         const delayMs = Math.max(0, localPlayMs - Date.now());
-        setTimeout(()=> updateVisual(bn), delayMs);
+        setTimeout(()=> updateVisual(beatIdxForUI), delayMs);
 
-        // leader sends beat info including serverScheduledMs and leaderOffsetMs
+        // leader sends message including serverScheduledMs and leaderOffsetMs (leader's measured offset)
         if (isLeader && dc && dc.readyState === 'open' && currentLeader) {
           const serverScheduledMs = localPlayMs + (leaderOffsetMs || 0); // server = local + leaderOffset
           const msg = {
             type: 'beat',
             beatNumber: bn,
-            beatIndex: bn, // absolute
+            beatIndex: bn,
             beatsPerMeasure,
             bpm,
             serverScheduledMs,
-            leaderOffsetMs
+            leaderOffsetMs: leaderOffsetMs || 0
           };
-          try { dc.send(JSON.stringify(msg)); } catch(e){ console.warn('dc send error', e); }
+          try { dc.send(JSON.stringify(msg)); appendDebug(`leader sent beat bn=${bn} serverMs=${serverScheduledMs}`); } catch(e){ console.warn('dc send err', e); }
         }
 
         scheduledBeats.add(bn);
       }
 
-      // advance
       nextNoteTime += noteInterval;
-      beatNumber++;
+      nextBeatNumber++;
     }
   }
 
@@ -170,30 +177,37 @@
     ensureAudio();
     if (audioCtx.state === 'suspended') audioCtx.resume();
     noteInterval = 60 / bpm;
-
-    const nowLocal = Date.now();
     scheduledBeats.clear();
 
+    const nowLocal = Date.now();
     if (!localStartMs || localStartMs <= nowLocal) {
-      // already started: compute how many beats elapsed and schedule next
       if (localStartMs) {
+        // leader already started: compute how many beats elapsed
         const elapsed = nowLocal - localStartMs;
         const beatsSince = Math.floor(elapsed / (noteInterval*1000));
-        beatNumber = beatsSince + 1;
+        lastPlayedBeatNumber = beatsSince;
+        // update visual immediately to show current beat
+        updateVisual(lastPlayedBeatNumber);
+        // next beat is beatsSince + 1
+        nextBeatNumber = beatsSince + 1;
         const nextLocalMs = localStartMs + (beatsSince + 1) * noteInterval * 1000;
         nextNoteTime = audioTimeFromLocalEpoch(nextLocalMs);
+        appendDebug(`start aligned: nowLocal=${nowLocal} localStart=${localStartMs} beatsSince=${beatsSince} nextLocalMs=${nextLocalMs}`);
       } else {
-        // immediate start
+        // immediate start (no leader)
         nextNoteTime = audioCtx.currentTime + 0.05;
-        beatNumber = 0;
+        nextBeatNumber = 0;
+        lastPlayedBeatNumber = -1;
+        appendDebug('start immediate local (no leader)');
       }
     } else {
-      // future start: schedule first beat at that time
+      // future start
       nextNoteTime = audioTimeFromLocalEpoch(localStartMs);
-      beatNumber = 0;
+      nextBeatNumber = 0;
+      lastPlayedBeatNumber = -1;
+      appendDebug(`scheduled future start at localStart=${localStartMs}`);
     }
 
-    // clear existing timer
     if (schedulerTimer) clearInterval(schedulerTimer);
     schedulerTimer = setInterval(schedulerTick, lookahead);
     isPlaying = true;
@@ -202,21 +216,23 @@
   function stopScheduler(){
     if (schedulerTimer) { clearInterval(schedulerTimer); schedulerTimer = null; }
     isPlaying = false;
-    beatNumber = 0;
+    nextBeatNumber = 0;
+    lastPlayedBeatNumber = -1;
     scheduledBeats.clear();
     dbgBeat.textContent = '-';
     renderSegments();
     updateVisual(0);
+    appendDebug('stopped scheduler');
   }
 
   function resetSchedulerForBPMChange(){
     noteInterval = 60 / bpm;
-    // preserve beatNumber, recompute nextNoteTime slightly ahead
     ensureAudio();
     nextNoteTime = audioCtx.currentTime + 0.05;
+    appendDebug(`BPM changed -> noteInterval=${noteInterval}`);
   }
 
-  // -------- timesync multi-sample ----------
+  // -------- timesync multi-sample (NTP-like) ----------
   async function timesyncMulti(samples = 12) {
     const results = [];
     for (let i=0;i<samples;i++){
@@ -230,7 +246,7 @@
         const T4 = Date.now();
         if (!r.ok) {
           const txt = await r.text();
-          console.warn('timesync sample failed', r.status, txt);
+          appendDebug(`timesync sample failed ${r.status} ${txt}`);
           await new Promise(r=>setTimeout(r,40));
           continue;
         }
@@ -239,6 +255,7 @@
         const offset = ((T2 - T1) + (T3 - T4)) / 2;
         const delay = (T4 - T1) - (T3 - T2);
         results.push({ offset, delay, T1, T2, T3, T4 });
+        appendDebug(`timesync sample ${i}: offset=${offset.toFixed(1)} delay=${delay.toFixed(1)}`);
       } catch (e) {
         console.warn('timesync sample err', e);
       }
@@ -259,10 +276,11 @@
     dbgLocal.textContent = String(Date.now());
     dbgOffset.textContent = offsetMs.toFixed(1);
     dbgDelay.textContent = medianDelay.toFixed(1);
+    appendDebug(`timesync done: offsetMs=${offsetMs} medianDelay=${medianDelay}`);
     return { offset: offsetMs, delay: medianDelay };
   }
 
-  // ---------- leader list and create ----------
+  // ---------- leader list / create ----------
   async function refreshLeaderList(){
     try {
       const r = await fetch(API_LEADERS);
@@ -292,28 +310,27 @@
     }
     const leader = await r.json();
     currentLeader = leader;
-    leaderLabel = leader.label;
     dbgLeaderStart.textContent = String(leader.startTime);
+    appendDebug(`leader created label=${leader.label} bpm=${leader.bpm} beats=${leader.beatsPerMeasure} start=${leader.startTime}`);
     return leader;
   }
 
-  // ---------- WebRTC signaling & DC (leader/follower) ----------
-  // leader: createOffer, store on server, poll for answer
+  // ---------- WebRTC signaling & DC ----------
   async function setupLeaderWebRTC(label){
     pc = new RTCPeerConnection();
     dc = pc.createDataChannel('beatSync');
-    dc.onopen = ()=>console.log('dc open leader');
+    dc.onopen = ()=> {
+      appendDebug('leader DC open');
+    };
     dc.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'dc_ping') {
-          // reply with dc_pong containing t1, t2 (leader recv), t3 (leader send) and leaderOffsetMs
           const t2 = Date.now();
           const reply = { type:'dc_pong', t1: msg.t1, t2, t3: Date.now(), leaderOffsetMs: leaderOffsetMs || 0 };
           try { dc.send(JSON.stringify(reply)); } catch(e){ console.warn('dc_pong send fail', e); }
         } else {
-          // other
-          console.log('leader dc got', msg);
+          appendDebug('leader DC recv: ' + JSON.stringify(msg).slice(0,200));
         }
       } catch (e) { console.warn('leader dc parse err', e); }
     };
@@ -334,20 +351,18 @@
         const j = await rr.json();
         if (j.payload) {
           await pc.setRemoteDescription(j.payload);
-          console.log('leader set remote answer');
+          appendDebug('leader set remote answer');
           return;
         } else {
           if (tries < 20) setTimeout(pollAnswer, 500);
         }
       } catch (e) {
         if (tries < 20) setTimeout(pollAnswer, 500);
-        else console.warn('poll answer error', e);
       }
     };
     pollAnswer();
   }
 
-  // follower: fetch offer, create answer, start DC ping/pong
   async function joinLeaderWebRTC(label){
     const q = `?type=offer&label=${encodeURIComponent(label)}`;
     const r = await fetch(API_SIGNAL + q);
@@ -359,7 +374,7 @@
     pc.ondatachannel = ev => {
       dc = ev.channel;
       dc.onopen = ()=> {
-        console.log('dc open follower');
+        appendDebug('follower DC open');
         startDCPingPong();
       };
       dc.onmessage = ev => handleLeaderDCMessage(ev.data);
@@ -369,61 +384,60 @@
     await pc.setLocalDescription(answer);
     const r2 = await fetch(API_SIGNAL, { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ type:'answer', label, payload: answer }) });
     if (!r2.ok) throw new Error('post answer failed: ' + r2.status);
-    console.log('follower posted answer');
+    appendDebug('follower posted answer');
   }
 
-  // handle leader DC message (beat or dc_pong)
   function handleLeaderDCMessage(raw){
     try {
       const msg = JSON.parse(raw);
       if (msg.type === 'beat') {
-        // leader sent scheduled beat with serverScheduledMs and leaderOffsetMs
+        // follower receives scheduled beat
         const serverMs = Number(msg.serverScheduledMs);
         const localPlayMs = serverMs - offsetMs;
         const audioWhen = audioTimeFromLocalEpoch(localPlayMs);
         const isAccent = (msg.beatsPerMeasure > 0) ? (msg.beatIndex % msg.beatsPerMeasure === 0) : true;
-        // avoid duplicate scheduling
+        // debug
+        const now = Date.now();
+        const delay = localPlayMs - now;
+        appendDebug(`follower recv beat bn=${msg.beatNumber} serverMs=${serverMs} localPlayMs=${localPlayMs} delay=${delay.toFixed(1)}`);
+        // schedule if not duplicate
         if (!scheduledBeats.has(msg.beatNumber)) {
           scheduleClick(audioWhen, isAccent && soundEnabled);
-          // visual update at play-time
-          const delay = Math.max(0, localPlayMs - Date.now());
-          setTimeout(()=> updateVisual(msg.beatIndex), delay);
+          const playDelay = Math.max(0, localPlayMs - Date.now());
+          setTimeout(()=> updateVisual(msg.beatIndex), playDelay);
           scheduledBeats.add(msg.beatNumber);
         }
         dbgBeat.textContent = String(msg.beatIndex);
-        // also record leaderOffsetMs reported
-        if (typeof msg.leaderOffsetMs === 'number') {
-          // we can compute refined offset: offset_f = leaderOffsetMs + offsetPeer (if we have offsetPeer)
-          // but offsetPeer comes from dc ping/pong. We'll use dc_pong handler for refinement.
-        }
+        // leaderOffsetMs info (for refinement) will be used by dc_pong handler
       } else if (msg.type === 'dc_pong') {
-        // reply from leader to follower ping
+        // follower ping-pong reply
         const t1 = msg.t1;
         const t2 = msg.t2;
         const t3 = msg.t3;
         const leaderOff = typeof msg.leaderOffsetMs === 'number' ? msg.leaderOffsetMs : null;
         const t4 = Date.now();
-        const offsetPeer = ((t2 - t1) + (t3 - t4)) / 2; // leader - follower
+        const offsetPeer = ((t2 - t1) + (t3 - t4)) / 2;
         const rtt = (t4 - t1) - (t3 - t2);
-        // if leader reports leaderOffsetMs we can compute follower offset_f = leaderOffsetMs + offsetPeer
+        appendDebug(`dc_pong offsetPeer=${offsetPeer.toFixed(1)} rtt=${rtt.toFixed(1)} leaderOff=${leaderOff}`);
         if (leaderOff !== null) {
           const refined = Math.round(leaderOff + offsetPeer);
-          // smooth update to offsetMs (blend)
           const alpha = 0.35;
           offsetMs = Math.round((1 - alpha) * offsetMs + alpha * refined);
           dbgOffset.textContent = offsetMs.toFixed(1);
           dbgDelay.textContent = rtt.toFixed(1);
         } else {
-          // if no leaderOff, we can still note lastDcPingResult
-          lastDcPingResult = { offsetPeer, rtt };
+          // fallback smoothing if leaderOff missing
+          const alpha = 0.2;
+          offsetMs = Math.round((1 - alpha) * offsetMs + alpha * (offsetMs + offsetPeer));
+          dbgOffset.textContent = offsetMs.toFixed(1);
         }
+      } else {
+        appendDebug('follower DC other: ' + JSON.stringify(msg).slice(0,200));
       }
-    } catch (e) {
-      console.warn('handleLeaderDCMessage err', e);
-    }
+    } catch (e) { console.warn('handleLeaderDCMessage err', e); }
   }
 
-  // follower periodic DC ping -> leader, expecting dc_pong
+  // follower dc ping
   function startDCPingPong(){
     if (!dc || dc.readyState !== 'open') return;
     stopDCPingPong();
@@ -431,54 +445,45 @@
       try {
         const t1 = Date.now();
         dc.send(JSON.stringify({ type:'dc_ping', t1 }));
-      } catch (e) { console.warn('dc ping send fail', e); }
+      } catch (e) { console.warn('dc ping fail', e); }
     }, 2000);
   }
-  function stopDCPingPong(){
-    if (dcPingInterval) { clearInterval(dcPingInterval); dcPingInterval = null; }
-  }
+  function stopDCPingPong(){ if (dcPingInterval) { clearInterval(dcPingInterval); dcPingInterval = null; } }
 
-  // --------- Buttons ----------
-  startLocalBtn.addEventListener('click', ()=> {
+  // -------- Buttons ----------
+  startLocalBtn.addEventListener('click', () => {
     isLeader = false;
-    const localStart = Date.now() + 50;
-    // apply local bpm/beats settings already taken from UI
-    bpm = Number(bpmRange.value);
-    beatsPerMeasure = Number(beatsPerMeasureSel.value);
+    bpm = Number(bpmRange.value); beatsPerMeasure = Number(beatsPerMeasureSel.value);
     noteInterval = 60 / bpm;
+    const localStart = Date.now() + 50;
     startSchedulerAtLocalStart(localStart);
+    appendDebug('local start pressed');
   });
 
-  stopLocalBtn.addEventListener('click', ()=> {
-    stopScheduler();
-    stopDCPingPong();
-  });
+  stopLocalBtn.addEventListener('click', () => { stopScheduler(); stopDCPingPong(); appendDebug('local stop pressed'); });
 
   startLeaderBtn.addEventListener('click', async () => {
     try {
-      // leader timesync (leaderOffsetMs becomes offsetMs after timesync)
-      await timesyncMulti(12); // sets offsetMs
-      leaderOffsetMs = offsetMs; // leader's offset to server
-      // create leader on server (server will send startTime)
+      await timesyncMulti(12);
+      leaderOffsetMs = offsetMs; // leader's offset to server baseline
       const leader = await createLeaderOnServer();
       currentLeader = leader;
       isLeader = true;
 
-      // apply leader settings to local
+      // apply leader settings to UI
       bpm = leader.bpm || bpm;
       beatsPerMeasure = leader.beatsPerMeasure || beatsPerMeasure;
       bpmRange.value = bpm; bpmVal.textContent = String(bpm);
       beatsPerMeasureSel.value = String(beatsPerMeasure);
       renderSegments();
 
-      // compute local start and start scheduler aligned
       const localStart = computeLocalStartFromLeader(leader.startTime);
       dbgLeaderStart.textContent = String(leader.startTime);
       startSchedulerAtLocalStart(localStart);
 
-      // setup webrtc
       await setupLeaderWebRTC(leader.label);
       setTimeout(refreshLeaderList, 400);
+      appendDebug('startLeader done');
     } catch (e) {
       console.error('start leader failed', e);
       alert('Start leader failed: ' + (e && e.message));
@@ -490,37 +495,48 @@
     if (!sel) return alert('請先選擇一個 leader');
     const label = decodeURIComponent(sel);
     try {
-      // timesync baseline for follower
-      await timesyncMulti(12);
-      // get leader detail
+      await timesyncMulti(12); // follower baseline offsetMs
       const r = await fetch(API_LEADERS + '?label=' + encodeURIComponent(label));
       if (!r.ok) throw new Error('fetch leader failed: ' + r.status);
       const leader = await r.json();
       currentLeader = leader;
 
-      // apply leader settings BEFORE computing start
+      // Apply leader settings BEFORE computing local start (important fix)
       bpm = leader.bpm || bpm;
       beatsPerMeasure = leader.beatsPerMeasure || beatsPerMeasure;
       bpmRange.value = bpm; bpmVal.textContent = String(bpm);
       beatsPerMeasureSel.value = String(beatsPerMeasure);
       renderSegments();
 
-      // compute local start from server start
       const localStart = computeLocalStartFromLeader(leader.startTime);
       dbgLeaderStart.textContent = String(leader.startTime);
 
-      // start scheduler aligned to leader start (this ensures we start at correct beat number)
+      // start scheduler aligned => this ensures follower uses same beat numbering
       startSchedulerAtLocalStart(localStart);
 
-      // join webrtc for DC messages (and start ping/pong)
+      // join WebRTC & start ping/pong
       await joinLeaderWebRTC(leader.label);
+      appendDebug(`joined leader ${label}`);
     } catch (e) {
       console.error('join failed', e);
       alert('Join failed: ' + (e && e.message));
     }
   });
 
-  // helper: create leader on server
+  // ---------- helpers ----------
+  async function refreshLeaderList(){
+    try {
+      const r = await fetch(API_LEADERS);
+      if (!r.ok) { leaderSelect.innerHTML = '<option value="">(error)</option>'; return; }
+      const arr = await r.json();
+      if (!Array.isArray(arr) || arr.length === 0) { leaderSelect.innerHTML = '<option value="">(no leaders)</option>'; return; }
+      leaderSelect.innerHTML = arr.map(l => `<option value="${encodeURIComponent(l.label)}">${l.label} — BPM:${l.bpm} / beats:${l.beatsPerMeasure}</option>`).join('');
+    } catch (e) {
+      console.warn('refresh leaders err', e);
+      leaderSelect.innerHTML = '<option value="">(error)</option>';
+    }
+  }
+
   async function createLeaderOnServer(){
     const label = (leaderLabelInput.value || '').trim() || randLabel();
     const payload = {
@@ -535,32 +551,28 @@
       const txt = await r.text();
       throw new Error('create leader failed: ' + r.status + ' ' + txt);
     }
-    return r.json();
+    const leader = await r.json();
+    appendDebug(`server created leader ${leader.label} start=${leader.startTime}`);
+    return leader;
   }
 
-  // compute local epoch ms from server startTime using offsetMs
+  // compute local epoch ms from server startTime
   function computeLocalStartFromLeader(serverStartMs){
     return Number(serverStartMs) - Number(offsetMs);
   }
 
-  // ---------- init ----------
-  async function refreshLeaderList(){
-    try {
-      const r = await fetch(API_LEADERS);
-      if (!r.ok) { leaderSelect.innerHTML = '<option value="">(error)</option>'; return; }
-      const arr = await r.json();
-      if (!Array.isArray(arr) || arr.length === 0) {
-        leaderSelect.innerHTML = '<option value="">(no leaders)</option>';
-        return;
-      }
-      leaderSelect.innerHTML = arr.map(l => `<option value="${encodeURIComponent(l.label)}">${l.label} — BPM:${l.bpm} / beats:${l.beatsPerMeasure}</option>`).join('');
-    } catch (e) {
-      console.warn('refreshLeaderList err', e);
-      leaderSelect.innerHTML = '<option value="">(error)</option>';
-    }
+  // audioTime from local epoch
+  function audioTimeFromLocalEpoch(localEpochMs){
+    ensureAudio();
+    const nowLocal = Date.now();
+    const dt = (localEpochMs - nowLocal) / 1000.0;
+    return audioCtx.currentTime + dt;
   }
 
-  // init UI & events
+  // expose debug helper
+  window._metronome = { timesyncMulti };
+
+  // init
   function init(){
     bpm = Number(bpmRange.value);
     beatsPerMeasure = Number(beatsPerMeasureSel.value);
@@ -571,8 +583,7 @@
     refreshLeaderList();
     setInterval(refreshLeaderList, 5000);
 
-    // update display bpm val
-    bpmRange.addEventListener('input', () => {
+    bpmRange.addEventListener('input', ()=> {
       bpm = Number(bpmRange.value);
       bpmVal.textContent = String(bpm);
       if (isPlaying) resetSchedulerForBPMChange();
@@ -582,11 +593,9 @@
       renderSegments();
       updateVisual(0);
     });
-    soundToggle.addEventListener('change', () => soundEnabled = soundToggle.checked);
+    soundToggle.addEventListener('change', ()=> soundEnabled = soundToggle.checked);
+    appendDebug('UI initialized');
   }
-
-  // expose debug
-  window._metronome = { timesyncMulti };
 
   init();
 })();
