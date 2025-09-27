@@ -31,7 +31,7 @@ module.exports = async function handler(req, res) {
 
     const t2 = Date.now(); // server receive time
     // minimal processing
-    const t3 = Date.now(); // server send time (as close as possible)
+    const t3 = t2; // server send time (as close as possible)
     const rtt = t3 - t1;
     recentRTTs.push(rtt);
     if (recentRTTs.length > MAX_SAMPLES) recentRTTs.shift();

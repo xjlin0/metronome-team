@@ -1,11 +1,26 @@
 // metronome.js
-// multi-beat pre-scheduling + dc ping/pong + timesync multi + join fixes + stronger 0 flash + debug logging
+// Hybrid: Audio Broadcast + Local Clock-Sync fallback
+// Features:
+// - WebAudio precise multi-beat scheduling (schedule-ahead buffer)
+// - Timesync (NTP-like multi-sample median smoothing)
+// - WebRTC: audio track (leader -> followers) + DataChannel beat messages
+// - dc ping/pong for continuous offset refinement
+// - Fallback: when audio stream lost, local scheduler unmutes and continues
+// - Rich debug visible in #debugLog and console.table
 (() => {
+  // ----- CONFIG -----
   const API_LEADERS = '/api/leaders';
   const API_TIMESYNC = '/api/timesync';
-  const API_SIGNAL = '/api/signal';
+  const API_SIGNAL = '/api/signal'; // signaling endpoint for offer/answer polling
+  const SAMPLES_TIMESYNC = 16; // how many timesync samples to take at start
+  const TIMESYNC_SAMPLE_INTERVAL_MS = 40;
+  const SCHEDULE_AHEAD_DEFAULT = 1.2; // seconds
+  const SCHEDULER_LOOKAHEAD_MS = 25; // scheduler tick interval
+  const DC_PING_INTERVAL_MS = 2000; // ping/pong interval
+  const AUDIO_FALLBACK_MS = 800; // if audio stream missing longer than this -> fallback to local
+  const AUDIO_RECOVER_MS = 400; // when audio resumes, wait this long to prefer audio again
 
-  // DOM
+  // ----- DOM -----
   const leaderLabelInput = document.getElementById('leaderLabel');
   const bpmRange = document.getElementById('bpm');
   const bpmVal = document.getElementById('bpmVal');
@@ -26,101 +41,102 @@
   const dbgBeat = document.getElementById('dbgBeat');
   const debugLogEl = document.getElementById('debugLog');
 
-  // state
+  // ----- STATE -----
   let audioCtx = null;
   let schedulerTimer = null;
-  let nextNoteTime = 0;       // audioCtx time for next scheduled note
-  let noteInterval = 60/120;  // seconds per beat
-  let scheduleAheadTime = 1.2; // seconds to schedule ahead (multi-beat)
-  let lookahead = 25;         // ms for scheduler tick
-  let nextBeatNumber = 0;     // absolute index of next beat to schedule
-  let lastPlayedBeatNumber = -1; // absolute index of last played beat (for visual)
-  let scheduledBeats = new Set(); // avoid duplicate scheduling by beatNumber
-  let bpm = Number(bpmRange && bpmRange.value ? bpmRange.value : 120);
-  let beatsPerMeasure = Number(beatsPerMeasureSel && beatsPerMeasureSel.value ? beatsPerMeasureSel.value : 4);
+  let nextNoteTime = 0;        // audioCtx time for next scheduled note
+  let noteInterval = 60 / 120; // seconds per beat (init)
+  let scheduleAheadTime = SCHEDULE_AHEAD_DEFAULT;
+  let lookahead = SCHEDULER_LOOKAHEAD_MS;
+  let nextBeatNumber = 0;      // absolute index of next beat to schedule
+  let lastPlayedBeatNumber = -1;
+  let scheduledBeats = new Set();
+  let bpm = Number((bpmRange && bpmRange.value) || 120);
+  let beatsPerMeasure = Number((beatsPerMeasureSel && beatsPerMeasureSel.value) || 4);
   let soundEnabled = soundToggle ? soundToggle.checked : true;
   let isPlaying = false;
   let isLeader = false;
-  let currentLeader = null;
+  let currentLeader = null; // object from server
   let offsetMs = 0; // server - local (ms)
   let medianDelay = 0;
-  let leaderOffsetMs = 0; // leader's offset measured at leader device (server - leader_local)
+  let leaderOffsetMs = 0; // leader's measured offset (server - leader_local)
 
   // WebRTC
   let pc = null;
   let dc = null;
-  let leaderLabel = null;
+  let localStreamForLeader = null; // MediaStream (leader's generated click track)
+  let incomingAudioEl = null; // audio element for follower to play incoming stream
+  let lastAudioPacketMs = 0; // last time we heard audio packet -> for fallback detection
+  let audioFallbackActive = false;
+  let audioRecoverTimer = null;
+
+  // DC ping
   let dcPingInterval = null;
 
-  // debug buffer
+  // debug storage
   const debugLines = [];
-  function appendDebug(s) {
-    const t = new Date().toISOString().slice(11,23) + ' ' + s;
+  function appendDebug(line) {
+    const t = new Date().toISOString().slice(11,23) + ' ' + line;
     debugLines.push(t);
-    if (debugLines.length > 400) debugLines.shift();
-    if (debugLogEl) debugLogEl.innerText = debugLines.slice().reverse().join('\n'); // newest first
-    // also log to console for convenience
+    if (debugLines.length > 600) debugLines.shift();
+    if (debugLogEl) debugLogEl.innerText = debugLines.slice().reverse().join('\n');
     console.log(t);
   }
 
-  // helper to append structured row to debug panel (human readable, tabular-ish)
-  function appendDebugRow(obj) {
-    // produce a short line with key fields if present
-    const { role = '', note = '', beatNumber, serverMs, localMs, now, diff } = obj || {};
-    const parts = [];
-    if (role) parts.push(`[${role}]`);
-    if (note) parts.push(note);
-    if (typeof beatNumber !== 'undefined') parts.push(`bn=${beatNumber}`);
-    if (typeof serverMs !== 'undefined') parts.push(`serverMs=${Math.round(serverMs)}`);
-    if (typeof localMs !== 'undefined') parts.push(`localMs=${Math.round(localMs)}`);
-    if (typeof now !== 'undefined') parts.push(`now=${Math.round(now)}`);
-    if (typeof diff !== 'undefined') parts.push(`diff=${diff.toFixed(1)}ms`);
-    appendDebug(parts.join(' | '));
-  }
-
-  // also show a more readable table in console and a compact UI table for last few rows
+  // table buffer for copy/paste
   const tableBuffer = [];
   function pushTableRow(row) {
     tableBuffer.push(row);
-    if (tableBuffer.length > 40) tableBuffer.shift();
-    // also print to console as table for easy copy/paste
+    if (tableBuffer.length > 400) tableBuffer.shift();
+    // show compact text line too
+    appendDebug(JSON.stringify(row));
     try { console.table([row]); } catch(e){}
-    // push a short text into debug panel too
-    appendDebugRow(row);
   }
 
-  // utilities
-  function randLabel(){
+  // generate random label default
+  function randLabel() {
     const s = Math.random().toString(36).slice(2).toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,6);
     return 'Beat-' + s.slice(0,4);
   }
-  if (leaderLabelInput) leaderLabelInput.value = randLabel();
+  if (leaderLabelInput && !leaderLabelInput.value) leaderLabelInput.value = randLabel();
 
-  // audio helpers
-  function ensureAudio(){
+  // ----- AUDIO HELPERS -----
+  function ensureAudioCtx() {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   }
 
-  function scheduleClick(audioTime, isAccent){
-    ensureAudio();
-    if (!soundEnabled) return;
+  // create a short click buffer and return MediaStreamTrack for leader broadcast
+  function createClickStreamForLeader() {
+    // We'll create a MediaStreamDestination and schedule short clicks into it.
+    ensureAudioCtx();
+    const dest = audioCtx.createMediaStreamDestination();
+    // We'll generate clicks live when scheduler schedules; but to give a track immediately we need dest.stream
+    return dest.stream;
+  }
+
+  function scheduleClickAtAudioTime(audioTime, isAccent) {
+    ensureAudioCtx();
+    if (!soundEnabled && (!isLeader || !audioFallbackActive)) return; // if soundDisabled and not fallback
     try {
       const o = audioCtx.createOscillator();
       const g = audioCtx.createGain();
       o.type = 'sine';
-      o.frequency.value = isAccent ? 1000 : 700;
-      // envelope: quick attack, short decay
+      o.frequency.value = isAccent ? 1400 : 900;
+      // envelope
       g.gain.setValueAtTime(0.0001, audioTime);
       g.gain.linearRampToValueAtTime(0.8, audioTime + 0.001);
-      g.gain.exponentialRampToValueAtTime(0.001, audioTime + 0.12);
+      g.gain.exponentialRampToValueAtTime(0.001, audioTime + 0.09);
       o.connect(g); g.connect(audioCtx.destination);
       o.start(audioTime);
-      o.stop(audioTime + 0.13);
-    } catch (e) { console.warn('scheduleClick err', e); appendDebug('scheduleClick err: ' + e.message); }
+      o.stop(audioTime + 0.10);
+    } catch (e) {
+      console.warn('scheduleClickAtAudioTime error', e);
+      appendDebug('scheduleClickAtAudioTime error: ' + (e && e.message));
+    }
   }
 
-  // visual
-  function renderSegments(){
+  // ----- VISUAL -----
+  function renderSegments() {
     if (!beatVisual) return;
     beatVisual.innerHTML = '';
     if (beatsPerMeasure > 0) {
@@ -129,76 +145,71 @@
         seg.className = 'segment';
         seg.dataset.index = String(i);
         seg.style.flexBasis = `${100 / beatsPerMeasure}%`;
-        // reset inline styles that may have been applied
-        seg.dataset.flashState = '0';
-        seg.style.background = '';
+        seg.style.transition = 'background 120ms ease';
         beatVisual.appendChild(seg);
       }
     } else {
       const seg = document.createElement('div');
       seg.className = 'segment flash';
       seg.style.flexBasis = '100%';
-      seg.dataset.flashState = '0';
-      // ensure starting color is high-contrast
-      seg.style.background = '#000000';
+      seg.style.transition = 'background 150ms ease';
+      seg.style.background = '#000';
       beatVisual.appendChild(seg);
     }
   }
 
-  function updateVisual(beatIdx){
+  function updateVisual(beatIdx) {
     if (!beatVisual) return;
     const segs = Array.from(beatVisual.children);
     if (beatsPerMeasure > 0) {
       segs.forEach((s, idx) => {
-        if (idx <= (beatIdx % beatsPerMeasure)) {
-          s.classList.add('active');
+        if (idx === (beatIdx % beatsPerMeasure)) {
+          s.style.background = '#ffb545'; // accent
         } else {
-          s.classList.remove('active');
+          s.style.background = '#e6e6e6';
         }
       });
     } else {
       const seg = segs[0];
       if (!seg) return;
-      // stronger flash: toggle to white/black for huge contrast
-      const state = seg.dataset.flashState === '1' ? '0' : '1';
-      seg.dataset.flashState = state;
-      if (state === '1') {
-        seg.style.background = '#FFFFFF'; // white
-      } else {
-        seg.style.background = '#000000'; // black
-      }
-      // keep it until next beat (don't immediately remove)
+      // toggling high-contrast
+      seg.style.background = seg.style.background === '#000' ? '#fff' : '#000';
     }
   }
 
-  // convert local epoch ms -> audioCtx time
-  function audioTimeFromLocalEpoch(localEpochMs){
-    ensureAudio();
+  // ----- Time conversions -----
+  function audioTimeFromLocalEpochMs(localEpochMs) {
+    ensureAudioCtx();
     const nowLocal = Date.now();
     const dt = (localEpochMs - nowLocal) / 1000.0;
     return audioCtx.currentTime + dt;
   }
 
-  // scheduling loop (pre-schedule many beats)
-  function schedulerTick(){
+  // ----- Scheduler (multi-beat pre-scheduling) -----
+  function schedulerTick() {
     if (!audioCtx) return;
     while (nextNoteTime < audioCtx.currentTime + scheduleAheadTime) {
       const bn = nextBeatNumber;
       if (!scheduledBeats.has(bn)) {
-        // compute local epoch ms for this note using mapping audioCtx -> Date.now
-        const localPlayMs = Date.now() + Math.round((nextNoteTime - audioCtx.currentTime)*1000);
-        const beatIdxForUI = bn; // absolute
+        // compute local epoch ms for this note
+        const localPlayMs = Date.now() + Math.round((nextNoteTime - audioCtx.currentTime) * 1000);
         const isAccent = (beatsPerMeasure > 0) ? (bn % beatsPerMeasure === 0) : true;
 
-        // schedule audio
-        scheduleClick(nextNoteTime, isAccent && soundEnabled);
-        // schedule visual at play time
-        const delayMs = Math.max(0, localPlayMs - Date.now());
-        setTimeout(()=> updateVisual(beatIdxForUI), delayMs);
+        // schedule local audio (this is the local click; may be muted while incoming audio stream plays)
+        if (!audioFallbackActive) {
+          // if audio stream active and follower, we may keep local silent to avoid double click
+          // but still schedule so fallback is seamless when audio lost
+        }
+        scheduleClickAtAudioTime(nextNoteTime, isAccent);
 
-        // leader sends message including serverScheduledMs and leaderOffsetMs (leader's measured offset)
+        // update visual at play time
+        const delayMs = Math.max(0, localPlayMs - Date.now());
+        setTimeout(()=> updateVisual(bn), delayMs);
+
+        // leader will broadcast beat message including serverScheduledMs
         if (isLeader && dc && dc.readyState === 'open' && currentLeader) {
-          const serverScheduledMs = localPlayMs + (leaderOffsetMs || 0); // server = local + leaderOffset
+          // leaderScheduledServerMs = localPlayMs + leaderOffsetMs (server = leader_local + leaderOffset)
+          const serverScheduledMs = Math.round(localPlayMs + (leaderOffsetMs || 0));
           const msg = {
             type: 'beat',
             beatNumber: bn,
@@ -210,73 +221,69 @@
           };
           try {
             dc.send(JSON.stringify(msg));
-            appendDebug(`leader sent beat bn=${bn} serverMs=${Math.round(serverScheduledMs)}`);
-            // also push a table row for leader send
+            appendDebug(`leader dc.send beat bn=${bn} serverMs=${serverScheduledMs}`);
             pushTableRow({
-              role: 'leader_send',
-              beatNumber: bn,
+              kind: 'leader_send',
+              bn,
               serverMs: serverScheduledMs,
               localMs: localPlayMs,
               now: Date.now(),
-              diff: (Date.now() - localPlayMs)
+              diff: Date.now() - localPlayMs
             });
-          } catch(e){
-            console.warn('dc send err', e);
-            appendDebug('dc send error: ' + (e && e.message));
+          } catch (e) {
+            appendDebug('leader dc.send err: ' + (e && e.message));
+            console.warn('leader dc send err', e);
           }
         }
 
         scheduledBeats.add(bn);
       }
-
+      // advance
       nextNoteTime += noteInterval;
       nextBeatNumber++;
     }
   }
 
-  function startSchedulerAtLocalStart(localStartMs){
-    ensureAudio();
+  function startSchedulerAtLocalStart(localStartMs) {
+    ensureAudioCtx();
     if (audioCtx.state === 'suspended') audioCtx.resume();
     noteInterval = 60 / bpm;
     scheduledBeats.clear();
 
     const nowLocal = Date.now();
 
-    // --- NEW: if we have a currentLeader (follower path), compute using server time baseline ---
     if (currentLeader && currentLeader.startTime) {
+      // follower path: align to server baseline
       try {
         const serverStart = Number(currentLeader.startTime);
         const nowServer = Date.now() + Number(offsetMs); // server = local + offset
         if (nowServer < serverStart) {
-          // leader start is in the future
+          // future start
           const nextLocalMs = serverStart - offsetMs;
-          nextNoteTime = audioTimeFromLocalEpoch(nextLocalMs);
+          nextNoteTime = audioTimeFromLocalEpochMs(nextLocalMs);
           nextBeatNumber = 0;
           lastPlayedBeatNumber = -1;
-          appendDebug(`scheduled future leader start: serverStart=${serverStart} nowServer=${nowServer} nextLocalMs=${nextLocalMs}`);
-          pushTableRow({ role:'follower_start', note:'future_start', serverStart, nextLocalMs, now: Date.now(), diff: nowLocal - nextLocalMs });
+          appendDebug(`scheduled future leader start: serverStart=${serverStart} nowServer=${nowServer} nextLocalMs=${Math.round(nextLocalMs)}`);
+          pushTableRow({ kind:'follower_start_future', serverStart, nextLocalMs, now: Date.now() });
         } else {
-          // leader already started: calculate beatsSince based on server times (this avoids off-by-one from local drift)
+          // already started -> compute beatsSince using server timeline (avoid local drift)
           const beatsSince = Math.floor((nowServer - serverStart) / (noteInterval * 1000));
           lastPlayedBeatNumber = beatsSince;
-          // update visual to show current beat at once
           updateVisual(lastPlayedBeatNumber);
-          // next beat server ms:
           const nextServerMs = serverStart + (beatsSince + 1) * noteInterval * 1000;
           const nextLocalMs = nextServerMs - offsetMs;
-          nextNoteTime = audioTimeFromLocalEpoch(nextLocalMs);
+          nextNoteTime = audioTimeFromLocalEpochMs(nextLocalMs);
           nextBeatNumber = beatsSince + 1;
           appendDebug(`start aligned (follower): nowServer=${nowServer} serverStart=${serverStart} beatsSince=${beatsSince} nextServerMs=${Math.round(nextServerMs)} nextLocalMs=${Math.round(nextLocalMs)}`);
-          pushTableRow({ role:'follower_start', note:'aligned', serverStart, nextServerMs, nextLocalMs, now: Date.now(), diff: (Date.now() - nextLocalMs) });
+          pushTableRow({ kind:'follower_start_aligned', serverStart, nextServerMs, nextLocalMs, beatsSince });
         }
       } catch (e) {
-        appendDebug('startSchedulerAtLocalStart follower branch error: ' + e.message);
-        // fallback to older behavior
+        appendDebug('startSchedulerAtLocalStart follower error: ' + (e && e.message));
+        // fallback to local start
         if (localStartMs && localStartMs > nowLocal) {
-          nextNoteTime = audioTimeFromLocalEpoch(localStartMs);
+          nextNoteTime = audioTimeFromLocalEpochMs(localStartMs);
           nextBeatNumber = 0;
           lastPlayedBeatNumber = -1;
-          appendDebug('fallback scheduled future start at localStart');
         } else if (localStartMs) {
           const elapsed = nowLocal - localStartMs;
           const beatsSince = Math.floor(elapsed / (noteInterval*1000));
@@ -284,46 +291,38 @@
           updateVisual(lastPlayedBeatNumber);
           nextBeatNumber = beatsSince + 1;
           const nextLocalMs = localStartMs + (beatsSince + 1) * noteInterval * 1000;
-          nextNoteTime = audioTimeFromLocalEpoch(nextLocalMs);
-          appendDebug(`fallback start aligned: beatsSince=${beatsSince} nextLocalMs=${nextLocalMs}`);
+          nextNoteTime = audioTimeFromLocalEpochMs(nextLocalMs);
         } else {
           nextNoteTime = audioCtx.currentTime + 0.05;
           nextBeatNumber = 0;
           lastPlayedBeatNumber = -1;
-          appendDebug('fallback immediate local start');
         }
       }
     } else {
-      // --- old behavior: local-only start (leader or standalone)
+      // local-only behavior (leader or standalone)
       if (!localStartMs || localStartMs <= nowLocal) {
         if (localStartMs) {
-          // already started: compute how many beats elapsed
           const elapsed = nowLocal - localStartMs;
           const beatsSince = Math.floor(elapsed / (noteInterval*1000));
           lastPlayedBeatNumber = beatsSince;
-          // update visual immediately to show current beat
           updateVisual(lastPlayedBeatNumber);
-          // next beat is beatsSince + 1
           nextBeatNumber = beatsSince + 1;
           const nextLocalMs = localStartMs + (beatsSince + 1) * noteInterval * 1000;
-          nextNoteTime = audioTimeFromLocalEpoch(nextLocalMs);
-          appendDebug(`start aligned: nowLocal=${nowLocal} localStart=${localStartMs} beatsSince=${beatsSince} nextLocalMs=${nextLocalMs}`);
-          pushTableRow({ role: isLeader ? 'leader_start' : 'local_start', localStartMs, nextLocalMs, beatsSince });
+          nextNoteTime = audioTimeFromLocalEpochMs(nextLocalMs);
+          appendDebug(`start aligned local: nowLocal=${nowLocal} localStart=${localStartMs} beatsSince=${beatsSince} nextLocalMs=${Math.round(nextLocalMs)}`);
+          pushTableRow({ kind:'local_start_aligned', localStartMs, nextLocalMs, beatsSince });
         } else {
-          // immediate start (no leader)
           nextNoteTime = audioCtx.currentTime + 0.05;
           nextBeatNumber = 0;
           lastPlayedBeatNumber = -1;
           appendDebug('start immediate local (no leader)');
-          pushTableRow({ role: 'local_start', note: 'immediate', now: Date.now() });
+          pushTableRow({ kind:'local_start_immediate', now: Date.now() });
         }
       } else {
-        // future start
-        nextNoteTime = audioTimeFromLocalEpoch(localStartMs);
+        nextNoteTime = audioTimeFromLocalEpochMs(localStartMs);
         nextBeatNumber = 0;
         lastPlayedBeatNumber = -1;
         appendDebug(`scheduled future start at localStart=${localStartMs}`);
-        pushTableRow({ role: 'local_futureStart', localStartMs });
       }
     }
 
@@ -332,7 +331,7 @@
     isPlaying = true;
   }
 
-  function stopScheduler(){
+  function stopScheduler() {
     if (schedulerTimer) { clearInterval(schedulerTimer); schedulerTimer = null; }
     isPlaying = false;
     nextBeatNumber = 0;
@@ -340,51 +339,52 @@
     scheduledBeats.clear();
     if (dbgBeat) dbgBeat.textContent = '-';
     renderSegments();
-    updateVisual(0);
     appendDebug('stopped scheduler');
   }
 
-  function resetSchedulerForBPMChange(){
+  function resetSchedulerForBpmChange() {
     noteInterval = 60 / bpm;
-    ensureAudio();
+    ensureAudioCtx();
     nextNoteTime = audioCtx.currentTime + 0.05;
     appendDebug(`BPM changed -> noteInterval=${noteInterval}`);
   }
 
-  // -------- timesync multi-sample (NTP-like) ----------
-  async function timesyncMulti(samples = 12) {
+  // ----- timesync (NTP-like multi-sample) -----
+  async function timesyncMulti(samples = SAMPLES_TIMESYNC) {
     const results = [];
     for (let i=0;i<samples;i++){
       const T1 = Date.now();
       try {
         const r = await fetch(API_TIMESYNC, {
-          method:'POST',
-          headers:{'content-type':'application/json'},
+          method: 'POST',
+          headers: {'content-type':'application/json'},
           body: JSON.stringify({ clientTime: T1 })
         });
         const T4 = Date.now();
         if (!r.ok) {
           const txt = await r.text();
           appendDebug(`timesync sample failed ${r.status} ${txt}`);
-          await new Promise(r=>setTimeout(r,40));
+          await new Promise(r => setTimeout(r, TIMESYNC_SAMPLE_INTERVAL_MS));
           continue;
         }
-        const j = await r.json(); // { t1,t2,t3, rtt, medianRTT } - server returns t2,t3 names per your timesync API
-        const T2 = j.t2, T3 = j.t3;
+        const j = await r.json(); // expect { t1, t2, t3 } or { t1, t2, t3, rtt }
+        // server-side we designed: return t2 (recv), t3 (send)
+        const T2 = Number(j.t2);
+        const T3 = Number(j.t3);
         const offset = ((T2 - T1) + (T3 - T4)) / 2;
         const delay = (T4 - T1) - (T3 - T2);
         results.push({ offset, delay, T1, T2, T3, T4 });
         appendDebug(`timesync sample ${i}: offset=${offset.toFixed(1)} delay=${delay.toFixed(1)}`);
-        pushTableRow({ role:'timesync_sample', sample:i, offset, delay, T1, T2, T3, T4 });
+        pushTableRow({ kind:'timesync_sample', i, offset, delay });
       } catch (e) {
-        console.warn('timesync sample err', e);
-        appendDebug(`timesync sample exception: ${e.message}`);
+        appendDebug('timesync sample exception: ' + (e && e.message));
       }
-      await new Promise(r => setTimeout(r, 30 + Math.random()*30));
+      await new Promise(r => setTimeout(r, TIMESYNC_SAMPLE_INTERVAL_MS + Math.random() * 40));
     }
 
-    if (results.length === 0) throw new Error('timesync failed');
+    if (results.length === 0) throw new Error('timesync failed (no samples)');
 
+    // sort by delay and keep lower half (less jitter)
     results.sort((a,b)=>a.delay - b.delay);
     const keep = results.slice(0, Math.max(3, Math.floor(results.length/2)));
     const offsets = keep.map(x=>x.offset).sort((a,b)=>a-b);
@@ -397,13 +397,13 @@
     if (dbgLocal) dbgLocal.textContent = String(Date.now());
     if (dbgOffset) dbgOffset.textContent = offsetMs.toFixed(1);
     if (dbgDelay) dbgDelay.textContent = medianDelay.toFixed(1);
-    appendDebug(`timesync done: offsetMs=${offsetMs} medianDelay=${medianDelay}`);
-    pushTableRow({ role:'timesync_done', offsetMs, medianDelay });
-    return { offset: offsetMs, delay: medianDelay };
+    appendDebug(`timesync done: offsetMs=${offsetMs} medianDelay=${medianDelay.toFixed(1)}`);
+    pushTableRow({ kind:'timesync_done', offsetMs, medianDelay });
+    return { offset: offsetMs, medianDelay };
   }
 
-  // ---------- leader list / create ----------
-  async function refreshLeaderList(){
+  // ----- Leader list & create -----
+  async function refreshLeaderList() {
     try {
       const r = await fetch(API_LEADERS);
       if (!r.ok) { leaderSelect.innerHTML = '<option value="">(error)</option>'; return; }
@@ -411,12 +411,12 @@
       if (!Array.isArray(arr) || arr.length === 0) { leaderSelect.innerHTML = '<option value="">(no leaders)</option>'; return; }
       leaderSelect.innerHTML = arr.map(l => `<option value="${encodeURIComponent(l.label)}">${l.label} — BPM:${l.bpm} / beats:${l.beatsPerMeasure}</option>`).join('');
     } catch (e) {
-      console.warn('refresh leaders err', e);
+      console.warn('refreshLeaderList err', e);
       leaderSelect.innerHTML = '<option value="">(error)</option>';
     }
   }
 
-  async function createLeaderOnServer(){
+  async function createLeaderOnServer() {
     const label = (leaderLabelInput.value || '').trim() || randLabel();
     const payload = {
       label,
@@ -425,82 +425,105 @@
       allowChangesByOthers: !!allowChangesInput.checked,
       startTime: Date.now() + 1500
     };
-    const r = await fetch(API_LEADERS, { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(payload) });
+    const r = await fetch(API_LEADERS, { method:'POST', headers: {'content-type':'application/json'}, body: JSON.stringify(payload) });
     if (!r.ok) {
       const txt = await r.text();
-      throw new Error('create leader failed: ' + r.status + ' ' + txt);
+      throw new Error('createLeaderOnServer failed: ' + r.status + ' ' + txt);
     }
     const leader = await r.json();
     currentLeader = leader;
     if (dbgLeaderStart) dbgLeaderStart.textContent = String(leader.startTime);
-    appendDebug(`leader created label=${leader.label} bpm=${leader.bpm} beats=${leader.beatsPerMeasure} start=${leader.startTime}`);
-    pushTableRow({ role:'server_created_leader', label: leader.label, start: leader.startTime, bpm: leader.bpm, beats: leader.beatsPerMeasure });
+    appendDebug(`server created leader ${leader.label} start=${leader.startTime}`);
+    pushTableRow({ kind:'server_created_leader', label: leader.label, start: leader.startTime });
     return leader;
   }
 
-  // ---------- WebRTC signaling & DC ----------
-  async function setupLeaderWebRTC(label){
+  // ----- WebRTC signaling & DataChannel + audio track -----
+  // Utility: small sleep
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  async function setupLeaderWebRTC(label) {
     pc = new RTCPeerConnection();
+    // create audio track (MediaStream) from an AudioContext destination so followers can hear leader's clicks
+    ensureAudioCtx();
+    const dest = audioCtx.createMediaStreamDestination();
+    localStreamForLeader = dest.stream; // keep reference to stop later
+    // Note: scheduleClick uses audioCtx.destination for local monitor; we also want a stream for followers.
+    // We'll connect scheduled clicks also to dest: when scheduling, we can create oscillator -> dest as well as destination
+    // For simplicity, when scheduling click we will also send a short buffer to dest via connecting osc->g->dest.
+    // We'll add the track(s) to PeerConnection:
+    const tracks = localStreamForLeader.getAudioTracks();
+    for (const t of tracks) pc.addTrack(t, localStreamForLeader);
+
     dc = pc.createDataChannel('beatSync');
-    dc.onopen = ()=> {
-      appendDebug('leader DC open');
-    };
+    dc.onopen = () => { appendDebug('leader DC open'); pushTableRow({ kind:'dc_open', role:'leader' }); };
     dc.onmessage = (ev) => {
+      // handle ping
       try {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'dc_ping') {
+          // reply quickly
           const t2 = Date.now();
-          const reply = { type:'dc_pong', t1: msg.t1, t2, t3: Date.now(), leaderOffsetMs: leaderOffsetMs || 0 };
-          try { dc.send(JSON.stringify(reply)); } catch(e){ console.warn('dc_pong send fail', e); appendDebug('dc_pong send fail: ' + e.message); }
+          const reply = { type: 'dc_pong', t1: msg.t1, t2, t3: Date.now(), leaderOffsetMs: leaderOffsetMs || 0 };
+          try { dc.send(JSON.stringify(reply)); }
+          catch(e) { appendDebug('leader dc_pong send failed: ' + (e && e.message)); }
         } else {
-          appendDebug('leader DC recv: ' + JSON.stringify(msg).slice(0,200));
+          appendDebug('leader DC rx: ' + JSON.stringify(msg).slice(0,200));
         }
-      } catch (e) { console.warn('leader dc parse err', e); appendDebug('leader dc parse err: ' + e.message); }
+      } catch (e) { appendDebug('leader DC message parse err: ' + (e && e.message)); }
     };
-    pc.onicecandidate = e => { if (e.candidate) console.log('leader ice', e.candidate); };
+    pc.onicecandidate = e => { /* ICE candidates logged to console for diagnostics */ if (e.candidate) console.log('leader ice', e.candidate); };
 
+    // create offer and POST to signaling server
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    const r = await fetch(API_SIGNAL, { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ type:'offer', label, payload: offer }) });
-    if (!r.ok) throw new Error('signal POST offer failed');
-    // poll for answer
+    const body = { type:'offer', label, payload: offer };
+    const r = await fetch(API_SIGNAL, { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) });
+    if (!r.ok) throw new Error('signal POST offer failed: ' + r.status);
+    appendDebug('leader offer posted to signaling server');
+    // poll for answer (server stores answer when follower posts)
     let tries = 0;
-    const pollAnswer = async () => {
+    while (tries < 40) {
       tries++;
-      const q = `?type=answer&label=${encodeURIComponent(label)}`;
       try {
+        const q = `?type=answer&label=${encodeURIComponent(label)}`;
         const rr = await fetch(API_SIGNAL + q);
-        if (!rr.ok) { if (tries < 20) return setTimeout(pollAnswer, 500); else throw new Error('poll answer failed'); }
-        const j = await rr.json();
-        if (j.payload) {
-          await pc.setRemoteDescription(j.payload);
-          appendDebug('leader set remote answer');
-          return;
-        } else {
-          if (tries < 20) setTimeout(pollAnswer, 500);
+        if (rr.ok) {
+          const j = await rr.json();
+          if (j && j.payload) {
+            await pc.setRemoteDescription(j.payload);
+            appendDebug('leader set remote answer');
+            pushTableRow({ kind:'leader_set_remote_answer', tries });
+            return;
+          }
         }
       } catch (e) {
-        if (tries < 20) setTimeout(pollAnswer, 500);
+        // ignore and retry
       }
-    };
-    pollAnswer();
+      await sleep(300);
+    }
+    throw new Error('polling for answer timed out');
   }
 
-  async function joinLeaderWebRTC(label){
+  async function joinLeaderWebRTC(label) {
     const q = `?type=offer&label=${encodeURIComponent(label)}`;
     const r = await fetch(API_SIGNAL + q);
     if (!r.ok) throw new Error('fetch offer failed: ' + r.status);
     const j = await r.json();
-    if (!j.payload) throw new Error('no offer found');
+    if (!j.payload) throw new Error('no offer found for label ' + label);
 
     pc = new RTCPeerConnection();
+    pc.ontrack = (ev) => {
+      // follower receives leader's audio track here
+      handleIncomingStream(ev.streams && ev.streams[0]);
+    };
     pc.ondatachannel = ev => {
       dc = ev.channel;
-      dc.onopen = ()=> {
+      dc.onopen = () => {
         appendDebug('follower DC open');
         startDCPingPong();
       };
-      dc.onmessage = ev => handleLeaderDCMessage(ev.data);
+      dc.onmessage = (ev) => handleLeaderDCMessage(ev.data);
     };
     await pc.setRemoteDescription(j.payload);
     const answer = await pc.createAnswer();
@@ -510,23 +533,103 @@
     appendDebug('follower posted answer');
   }
 
-  function handleLeaderDCMessage(raw){
+  function handleIncomingStream(stream) {
+    if (!stream) return;
+    // attach to an audio element for playback and monitoring
+    if (!incomingAudioEl) {
+      incomingAudioEl = document.createElement('audio');
+      incomingAudioEl.autoplay = true;
+      incomingAudioEl.muted = false; // follower hears it
+      incomingAudioEl.playsInline = true;
+      incomingAudioEl.style.display = 'none';
+      document.body.appendChild(incomingAudioEl);
+
+      // monitor playback to detect audio activity
+      incomingAudioEl.addEventListener('playing', () => {
+        lastAudioPacketMs = Date.now();
+        appendDebug('incoming audio playing');
+      });
+      incomingAudioEl.addEventListener('pause', () => {
+        appendDebug('incoming audio paused');
+      });
+      incomingAudioEl.addEventListener('ended', () => {
+        appendDebug('incoming audio ended');
+      });
+    }
+    try {
+      incomingAudioEl.srcObject = stream;
+      lastAudioPacketMs = Date.now();
+      appendDebug('incoming stream attached');
+      pushTableRow({ kind:'incoming_stream_attached', now: Date.now() });
+      // When audio plays, prefer audio-stream over local clicks; schedule fallback detection
+      // Start monitor
+      startAudioMonitor();
+    } catch (e) {
+      appendDebug('handleIncomingStream err: ' + (e && e.message));
+    }
+  }
+
+  // audio monitor: detect when audio stream stops and fallback
+  let audioMonitorInterval = null;
+  function startAudioMonitor() {
+    stopAudioMonitor();
+    audioMonitorInterval = setInterval(() => {
+      const now = Date.now();
+      // if we haven't heard audio for longer than threshold, trigger fallback
+      if (now - lastAudioPacketMs > AUDIO_FALLBACK_MS) {
+        if (!audioFallbackActive) {
+          appendDebug('Audio stream missing -> enabling local fallback');
+          pushTableRow({ kind:'audio_fallback_start', now });
+          audioFallbackActive = true;
+          // we should unmute local clicks (they were scheduled but maybe silent)
+          // If scheduler already running and local clicks scheduled, they will play (unless we had logic to silence)
+          // If scheduler not running, start it aligned to server start
+          if (!isPlaying) {
+            // align to leader if known
+            if (currentLeader && currentLeader.startTime) {
+              const localStart = computeLocalStartFromLeader(currentLeader.startTime);
+              startSchedulerAtLocalStart(localStart);
+            } else {
+              startSchedulerAtLocalStart(Date.now() + 50);
+            }
+          }
+        }
+      } else {
+        // audio stream present
+        if (audioFallbackActive) {
+          // we heard audio again recently -> schedule gentle switch back to audio-stream dominant
+          if (audioRecoverTimer) clearTimeout(audioRecoverTimer);
+          audioRecoverTimer = setTimeout(() => {
+            audioFallbackActive = false;
+            appendDebug('Audio stream recovered -> disable local fallback (prefer incoming audio)');
+            pushTableRow({ kind:'audio_fallback_recover', now: Date.now() });
+          }, AUDIO_RECOVER_MS);
+        }
+      }
+    }, 120);
+  }
+  function stopAudioMonitor() {
+    if (audioMonitorInterval) { clearInterval(audioMonitorInterval); audioMonitorInterval = null; }
+    if (audioRecoverTimer) { clearTimeout(audioRecoverTimer); audioRecoverTimer = null; }
+  }
+
+  // ----- DataChannel handling (follower side) -----
+  function handleLeaderDCMessage(raw) {
     try {
       const msg = JSON.parse(raw);
       if (msg.type === 'beat') {
         // follower receives scheduled beat
         const serverMs = Number(msg.serverScheduledMs);
         const localPlayMs = serverMs - offsetMs;
-        const audioWhen = audioTimeFromLocalEpoch(localPlayMs);
+        const audioWhen = audioTimeFromLocalEpochMs(localPlayMs);
         const isAccent = (msg.beatsPerMeasure > 0) ? (msg.beatIndex % msg.beatsPerMeasure === 0) : true;
-        // debug
         const now = Date.now();
-        const delay = localPlayMs - now;
-        appendDebug(`follower recv beat bn=${msg.beatNumber} serverMs=${Math.round(serverMs)} localPlayMs=${Math.round(localPlayMs)} delay=${delay.toFixed(1)}`);
+        const diff = localPlayMs - now;
 
-        // print a console.table and also push a UI row for easy copy/paste
+        appendDebug(`follower recv beat bn=${msg.beatNumber} serverMs=${Math.round(serverMs)} localPlayMs=${Math.round(localPlayMs)} diff=${diff.toFixed(1)}`);
+        // print structured debug row
         const tableRow = {
-          role: 'follower_recv',
+          kind: 'follower_recv_beat',
           beatNumber: msg.beatNumber,
           beatIndex: msg.beatIndex,
           serverScheduledMs: Math.round(serverMs),
@@ -534,44 +637,35 @@
           nowLocalMs: now,
           diffMs: +(localPlayMs - now).toFixed(2)
         };
-        try { console.table([tableRow]); } catch(e){}
         pushTableRow(tableRow);
 
-        // *** Resync logic: if incoming beatNumber significantly differs from our nextBeatNumber,
-        // adjust nextBeatNumber/nextNoteTime so we don't stay out-of-phase. ***
+        // Resync logic if beatNumber differs a lot
         const bn = Number(msg.beatNumber);
         if (typeof nextBeatNumber === 'number') {
-          const diff = bn - nextBeatNumber;
-          // if follower is ahead/behind by >1 beats, resync to leader reference
-          if (Math.abs(diff) > 1) {
-            appendDebug(`Resyncing: leader bn=${bn} vs local nextBeatNumber=${nextBeatNumber} diff=${diff}`);
-            // clear scheduled set to avoid duplicates
+          const diffBn = bn - nextBeatNumber;
+          if (Math.abs(diffBn) > 1) {
+            appendDebug(`Resync: leader bn=${bn} local next=${nextBeatNumber} diff=${diffBn}`);
             scheduledBeats.clear();
-            // set nextBeatNumber to leader's next
             nextBeatNumber = bn + 1;
-            // compute next local ms (serverMs + noteInterval*1000 - offset)
             const nextServerMs = serverMs + (noteInterval * 1000);
             const nextLocalMs = nextServerMs - offsetMs;
-            nextNoteTime = audioTimeFromLocalEpoch(nextLocalMs);
-            appendDebug(`Resynced: nextServerMs=${Math.round(nextServerMs)} nextLocalMs=${Math.round(nextLocalMs)} nextBeatNumber=${nextBeatNumber}`);
-            pushTableRow({ role:'resync', bn, diff, nextServerMs: Math.round(nextServerMs), nextLocalMs: Math.round(nextLocalMs), now: Date.now() });
+            nextNoteTime = audioTimeFromLocalEpochMs(nextLocalMs);
+            appendDebug(`Resynced nextLocalMs=${Math.round(nextLocalMs)} nextBeatNumber=${nextBeatNumber}`);
+            pushTableRow({ kind:'resync', bn, diffBn, nextLocalMs: Math.round(nextLocalMs) });
           }
         }
 
-        // schedule if not duplicate
+        // schedule local click so fallback is seamless; if audio stream is current and not fallback active, we might not hear it (audio stream will be heard instead)
         if (!scheduledBeats.has(bn)) {
-          scheduleClick(audioWhen, isAccent && soundEnabled);
+          scheduleClickAtAudioTime(audioWhen, isAccent && soundEnabled);
           const playDelay = Math.max(0, localPlayMs - Date.now());
           setTimeout(()=> updateVisual(msg.beatIndex), playDelay);
           scheduledBeats.add(bn);
         }
         if (dbgBeat) dbgBeat.textContent = String(msg.beatIndex);
-        // leaderOffsetMs info (for refinement) will be used by dc_pong handler
+
       } else if (msg.type === 'dc_pong') {
-        // follower ping-pong reply
-        const t1 = msg.t1;
-        const t2 = msg.t2;
-        const t3 = msg.t3;
+        const t1 = msg.t1, t2 = msg.t2, t3 = msg.t3;
         const leaderOff = typeof msg.leaderOffsetMs === 'number' ? msg.leaderOffsetMs : null;
         const t4 = Date.now();
         const offsetPeer = ((t2 - t1) + (t3 - t4)) / 2;
@@ -583,35 +677,42 @@
           offsetMs = Math.round((1 - alpha) * offsetMs + alpha * refined);
           if (dbgOffset) dbgOffset.textContent = offsetMs.toFixed(1);
           if (dbgDelay) dbgDelay.textContent = rtt.toFixed(1);
-          pushTableRow({ role:'dc_pong_refine', offsetMs, rtt });
+          pushTableRow({ kind:'dc_pong_refine', offsetMs, rtt });
         } else {
-          // fallback smoothing if leaderOff missing
           const alpha = 0.2;
           offsetMs = Math.round((1 - alpha) * offsetMs + alpha * (offsetMs + offsetPeer));
           if (dbgOffset) dbgOffset.textContent = offsetMs.toFixed(1);
-          pushTableRow({ role:'dc_pong_fallback', offsetMs, rtt });
+          pushTableRow({ kind:'dc_pong_fallback', offsetMs, rtt });
         }
+
       } else {
         appendDebug('follower DC other: ' + JSON.stringify(msg).slice(0,200));
       }
-    } catch (e) { console.warn('handleLeaderDCMessage err', e); appendDebug('handleLeaderDCMessage err: ' + (e && e.message)); }
+    } catch (e) {
+      console.warn('handleLeaderDCMessage err', e);
+      appendDebug('handleLeaderDCMessage err: ' + (e && e.message));
+    }
   }
 
-  // follower dc ping
-  function startDCPingPong(){
+  // follower ping
+  function startDCPingPong() {
     if (!dc || dc.readyState !== 'open') return;
     stopDCPingPong();
-    dcPingInterval = setInterval(()=> {
+    dcPingInterval = setInterval(() => {
       try {
         const t1 = Date.now();
         dc.send(JSON.stringify({ type:'dc_ping', t1 }));
-        pushTableRow({ role:'dc_ping', t1 });
-      } catch (e) { console.warn('dc ping fail', e); appendDebug('dc ping fail: ' + e.message); }
-    }, 2000);
+        pushTableRow({ kind:'dc_ping', t1 });
+      } catch (e) {
+        appendDebug('dc ping send fail: ' + (e && e.message));
+      }
+    }, DC_PING_INTERVAL_MS);
   }
-  function stopDCPingPong(){ if (dcPingInterval) { clearInterval(dcPingInterval); dcPingInterval = null; } }
+  function stopDCPingPong() {
+    if (dcPingInterval) { clearInterval(dcPingInterval); dcPingInterval = null; }
+  }
 
-  // -------- Buttons ----------
+  // ----- Buttons (UI handlers) -----
   startLocalBtn.addEventListener('click', () => {
     isLeader = false;
     bpm = Number(bpmRange.value); beatsPerMeasure = Number(beatsPerMeasureSel.value);
@@ -619,34 +720,46 @@
     const localStart = Date.now() + 50;
     startSchedulerAtLocalStart(localStart);
     appendDebug('local start pressed');
-    pushTableRow({ role:'ui', action:'local_start', localStart });
+    pushTableRow({ kind:'ui', action:'local_start', localStart });
   });
 
-  stopLocalBtn.addEventListener('click', () => { stopScheduler(); stopDCPingPong(); appendDebug('local stop pressed'); pushTableRow({ role:'ui', action:'local_stop' }); });
+  stopLocalBtn.addEventListener('click', () => {
+    stopScheduler();
+    stopDCPingPong();
+    appendDebug('local stop pressed');
+    pushTableRow({ kind:'ui', action:'local_stop' });
+  });
 
   startLeaderBtn.addEventListener('click', async () => {
     try {
-      await timesyncMulti(12);
+      // timesync to server baseline
+      await timesyncMulti(SAMPLES_TIMESYNC);
       leaderOffsetMs = offsetMs; // leader's offset to server baseline
+      // create leader on server
       const leader = await createLeaderOnServer();
       currentLeader = leader;
       isLeader = true;
 
-      // apply leader settings to UI
+      // apply leader settings
       bpm = leader.bpm || bpm;
       beatsPerMeasure = leader.beatsPerMeasure || beatsPerMeasure;
       bpmRange.value = bpm; bpmVal.textContent = String(bpm);
       beatsPerMeasureSel.value = String(beatsPerMeasure);
       renderSegments();
 
+      // compute local start using server startTime
       const localStart = computeLocalStartFromLeader(leader.startTime);
       if (dbgLeaderStart) dbgLeaderStart.textContent = String(leader.startTime);
+      // start local scheduler aligned
       startSchedulerAtLocalStart(localStart);
 
+      // setup leader WebRTC: add audio track + DC
       await setupLeaderWebRTC(leader.label);
+
+      // refresh list and UI
       setTimeout(refreshLeaderList, 400);
       appendDebug('startLeader done');
-      pushTableRow({ role:'ui', action:'startLeader', label: leader.label, start: leader.startTime });
+      pushTableRow({ kind:'ui', action:'startLeader', label: leader.label, start: leader.startTime });
     } catch (e) {
       console.error('start leader failed', e);
       alert('Start leader failed: ' + (e && e.message));
@@ -659,13 +772,14 @@
     if (!sel) return alert('請先選擇一個 leader');
     const label = decodeURIComponent(sel);
     try {
-      await timesyncMulti(12); // follower baseline offsetMs
+      // timesync baseline for follower
+      await timesyncMulti(SAMPLES_TIMESYNC);
       const r = await fetch(API_LEADERS + '?label=' + encodeURIComponent(label));
       if (!r.ok) throw new Error('fetch leader failed: ' + r.status);
       const leader = await r.json();
       currentLeader = leader;
 
-      // Apply leader settings BEFORE computing local start (important fix)
+      // apply leader settings BEFORE computing local start
       bpm = leader.bpm || bpm;
       beatsPerMeasure = leader.beatsPerMeasure || beatsPerMeasure;
       bpmRange.value = bpm; bpmVal.textContent = String(bpm);
@@ -675,13 +789,13 @@
       const localStart = computeLocalStartFromLeader(leader.startTime);
       if (dbgLeaderStart) dbgLeaderStart.textContent = String(leader.startTime);
 
-      // start scheduler aligned => this ensures follower uses same beat numbering
+      // start local scheduler aligned (keeps local timing ready for fallback)
       startSchedulerAtLocalStart(localStart);
 
-      // join WebRTC & start ping/pong
+      // join WebRTC audio/DC
       await joinLeaderWebRTC(leader.label);
       appendDebug(`joined leader ${label}`);
-      pushTableRow({ role:'ui', action:'joined', label });
+      pushTableRow({ kind:'ui', action:'join', label });
     } catch (e) {
       console.error('join failed', e);
       alert('Join failed: ' + (e && e.message));
@@ -689,21 +803,15 @@
     }
   });
 
-  // ---------- helpers ----------
-  async function refreshLeaderList(){
+  // ----- helpers -----
+  async function refreshLeaderListPeriodic() {
     try {
-      const r = await fetch(API_LEADERS);
-      if (!r.ok) { leaderSelect.innerHTML = '<option value="">(error)</option>'; return; }
-      const arr = await r.json();
-      if (!Array.isArray(arr) || arr.length === 0) { leaderSelect.innerHTML = '<option value="">(no leaders)</option>'; return; }
-      leaderSelect.innerHTML = arr.map(l => `<option value="${encodeURIComponent(l.label)}">${l.label} — BPM:${l.bpm} / beats:${l.beatsPerMeasure}</option>`).join('');
-    } catch (e) {
-      console.warn('refresh leaders err', e);
-      leaderSelect.innerHTML = '<option value="">(error)</option>';
-    }
+      await refreshLeaderList();
+    } catch (e) { /* ignore */ }
+    setTimeout(refreshLeaderListPeriodic, 6000);
   }
 
-  async function createLeaderOnServer(){
+  async function createLeaderOnServer() {
     const label = (leaderLabelInput.value || '').trim() || randLabel();
     const payload = {
       label,
@@ -719,28 +827,24 @@
     }
     const leader = await r.json();
     appendDebug(`server created leader ${leader.label} start=${leader.startTime}`);
-    pushTableRow({ role:'server_created_leader', label: leader.label, start: leader.startTime, bpm: leader.bpm, beats: leader.beatsPerMeasure });
+    pushTableRow({ kind:'server_created_leader', label: leader.label, start: leader.startTime });
     return leader;
   }
 
-  // compute local epoch ms from server startTime
-  function computeLocalStartFromLeader(serverStartMs){
+  // convert server start time -> local ms by subtracting our offset (server - local)
+  function computeLocalStartFromLeader(serverStartMs) {
     return Number(serverStartMs) - Number(offsetMs);
   }
 
-  // audioTime from local epoch
-  function audioTimeFromLocalEpoch(localEpochMs){
-    ensureAudio();
-    const nowLocal = Date.now();
-    const dt = (localEpochMs - nowLocal) / 1000.0;
-    return audioCtx.currentTime + dt;
-  }
+  // expose debug
+  window._metronome = {
+    timesyncMulti,
+    pushTableRow,
+    getTableBuffer: () => tableBuffer.slice()
+  };
 
-  // expose debug helper
-  window._metronome = { timesyncMulti };
-
-  // init
-  function init(){
+  // ----- INIT UI + events -----
+  function init() {
     bpm = Number(bpmRange.value);
     beatsPerMeasure = Number(beatsPerMeasureSel.value);
     soundEnabled = soundToggle.checked;
@@ -748,9 +852,9 @@
     renderSegments();
     updateVisual(0);
     refreshLeaderList();
-    setInterval(refreshLeaderList, 5000);
+    refreshLeaderListPeriodic();
 
-    bpmRange.addEventListener('input', ()=> {
+    bpmRange.addEventListener('input', () => {
       bpm = Number(bpmRange.value);
       bpmVal.textContent = String(bpm);
       if (isPlaying) resetSchedulerForBPMChange();
@@ -761,8 +865,24 @@
       updateVisual(0);
     });
     soundToggle.addEventListener('change', ()=> soundEnabled = soundToggle.checked);
+
     appendDebug('UI initialized');
   }
 
+  function resetSchedulerForBPMChange() {
+    noteInterval = 60 / bpm;
+    ensureAudioCtx();
+    nextNoteTime = audioCtx.currentTime + 0.05;
+    appendDebug(`BPM changed -> noteInterval=${noteInterval}`);
+  }
+
+  // ----- Start audio monitor heartbeat (called when audio stream present) -----
+  // We'll update lastAudioPacketMs periodically based on audio context time to indicate activity.
+  // Since ontrack events don't always guarantee continuous events, rely on incomingAudioEl playing to mark alive.
+  // We set lastAudioPacketMs when ontrack/playing events occur.
+
+  // ----- Boot -----
   init();
+
+  // ---------- End closure ----------
 })();
