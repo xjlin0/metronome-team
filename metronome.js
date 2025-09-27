@@ -36,9 +36,9 @@
   let nextBeatNumber = 0;     // absolute index of next beat to schedule
   let lastPlayedBeatNumber = -1; // absolute index of last played beat (for visual)
   let scheduledBeats = new Set(); // avoid duplicate scheduling by beatNumber
-  let bpm = Number(bpmRange.value || 120);
-  let beatsPerMeasure = Number(beatsPerMeasureSel.value || 4);
-  let soundEnabled = soundToggle.checked;
+  let bpm = Number(bpmRange && bpmRange.value ? bpmRange.value : 120);
+  let beatsPerMeasure = Number(beatsPerMeasureSel && beatsPerMeasureSel.value ? beatsPerMeasureSel.value : 4);
+  let soundEnabled = soundToggle ? soundToggle.checked : true;
   let isPlaying = false;
   let isLeader = false;
   let currentLeader = null;
@@ -57,10 +57,36 @@
   function appendDebug(s) {
     const t = new Date().toISOString().slice(11,23) + ' ' + s;
     debugLines.push(t);
-    if (debugLines.length > 200) debugLines.shift();
+    if (debugLines.length > 400) debugLines.shift();
     if (debugLogEl) debugLogEl.innerText = debugLines.slice().reverse().join('\n'); // newest first
     // also log to console for convenience
     console.log(t);
+  }
+
+  // helper to append structured row to debug panel (human readable, tabular-ish)
+  function appendDebugRow(obj) {
+    // produce a short line with key fields if present
+    const { role = '', note = '', beatNumber, serverMs, localMs, now, diff } = obj || {};
+    const parts = [];
+    if (role) parts.push(`[${role}]`);
+    if (note) parts.push(note);
+    if (typeof beatNumber !== 'undefined') parts.push(`bn=${beatNumber}`);
+    if (typeof serverMs !== 'undefined') parts.push(`serverMs=${Math.round(serverMs)}`);
+    if (typeof localMs !== 'undefined') parts.push(`localMs=${Math.round(localMs)}`);
+    if (typeof now !== 'undefined') parts.push(`now=${Math.round(now)}`);
+    if (typeof diff !== 'undefined') parts.push(`diff=${diff.toFixed(1)}ms`);
+    appendDebug(parts.join(' | '));
+  }
+
+  // also show a more readable table in console and a compact UI table for last few rows
+  const tableBuffer = [];
+  function pushTableRow(row) {
+    tableBuffer.push(row);
+    if (tableBuffer.length > 40) tableBuffer.shift();
+    // also print to console as table for easy copy/paste
+    try { console.table([row]); } catch(e){}
+    // push a short text into debug panel too
+    appendDebugRow(row);
   }
 
   // utilities
@@ -83,13 +109,14 @@
       const g = audioCtx.createGain();
       o.type = 'sine';
       o.frequency.value = isAccent ? 1000 : 700;
+      // envelope: quick attack, short decay
       g.gain.setValueAtTime(0.0001, audioTime);
       g.gain.linearRampToValueAtTime(0.8, audioTime + 0.001);
       g.gain.exponentialRampToValueAtTime(0.001, audioTime + 0.12);
       o.connect(g); g.connect(audioCtx.destination);
       o.start(audioTime);
       o.stop(audioTime + 0.13);
-    } catch (e) { console.warn('scheduleClick err', e); }
+    } catch (e) { console.warn('scheduleClick err', e); appendDebug('scheduleClick err: ' + e.message); }
   }
 
   // visual
@@ -119,6 +146,7 @@
   }
 
   function updateVisual(beatIdx){
+    if (!beatVisual) return;
     const segs = Array.from(beatVisual.children);
     if (beatsPerMeasure > 0) {
       segs.forEach((s, idx) => {
@@ -180,7 +208,22 @@
             serverScheduledMs,
             leaderOffsetMs: leaderOffsetMs || 0
           };
-          try { dc.send(JSON.stringify(msg)); appendDebug(`leader sent beat bn=${bn} serverMs=${serverScheduledMs}`); } catch(e){ console.warn('dc send err', e); appendDebug('dc send error: ' + e.message); }
+          try {
+            dc.send(JSON.stringify(msg));
+            appendDebug(`leader sent beat bn=${bn} serverMs=${Math.round(serverScheduledMs)}`);
+            // also push a table row for leader send
+            pushTableRow({
+              role: 'leader_send',
+              beatNumber: bn,
+              serverMs: serverScheduledMs,
+              localMs: localPlayMs,
+              now: Date.now(),
+              diff: (Date.now() - localPlayMs)
+            });
+          } catch(e){
+            console.warn('dc send err', e);
+            appendDebug('dc send error: ' + (e && e.message));
+          }
         }
 
         scheduledBeats.add(bn);
@@ -211,6 +254,7 @@
           nextBeatNumber = 0;
           lastPlayedBeatNumber = -1;
           appendDebug(`scheduled future leader start: serverStart=${serverStart} nowServer=${nowServer} nextLocalMs=${nextLocalMs}`);
+          pushTableRow({ role:'follower_start', note:'future_start', serverStart, nextLocalMs, now: Date.now(), diff: nowLocal - nextLocalMs });
         } else {
           // leader already started: calculate beatsSince based on server times (this avoids off-by-one from local drift)
           const beatsSince = Math.floor((nowServer - serverStart) / (noteInterval * 1000));
@@ -222,7 +266,8 @@
           const nextLocalMs = nextServerMs - offsetMs;
           nextNoteTime = audioTimeFromLocalEpoch(nextLocalMs);
           nextBeatNumber = beatsSince + 1;
-          appendDebug(`start aligned (follower): nowServer=${nowServer} serverStart=${serverStart} beatsSince=${beatsSince} nextServerMs=${nextServerMs} nextLocalMs=${nextLocalMs}`);
+          appendDebug(`start aligned (follower): nowServer=${nowServer} serverStart=${serverStart} beatsSince=${beatsSince} nextServerMs=${Math.round(nextServerMs)} nextLocalMs=${Math.round(nextLocalMs)}`);
+          pushTableRow({ role:'follower_start', note:'aligned', serverStart, nextServerMs, nextLocalMs, now: Date.now(), diff: (Date.now() - nextLocalMs) });
         }
       } catch (e) {
         appendDebug('startSchedulerAtLocalStart follower branch error: ' + e.message);
@@ -263,12 +308,14 @@
           const nextLocalMs = localStartMs + (beatsSince + 1) * noteInterval * 1000;
           nextNoteTime = audioTimeFromLocalEpoch(nextLocalMs);
           appendDebug(`start aligned: nowLocal=${nowLocal} localStart=${localStartMs} beatsSince=${beatsSince} nextLocalMs=${nextLocalMs}`);
+          pushTableRow({ role: isLeader ? 'leader_start' : 'local_start', localStartMs, nextLocalMs, beatsSince });
         } else {
           // immediate start (no leader)
           nextNoteTime = audioCtx.currentTime + 0.05;
           nextBeatNumber = 0;
           lastPlayedBeatNumber = -1;
           appendDebug('start immediate local (no leader)');
+          pushTableRow({ role: 'local_start', note: 'immediate', now: Date.now() });
         }
       } else {
         // future start
@@ -276,6 +323,7 @@
         nextBeatNumber = 0;
         lastPlayedBeatNumber = -1;
         appendDebug(`scheduled future start at localStart=${localStartMs}`);
+        pushTableRow({ role: 'local_futureStart', localStartMs });
       }
     }
 
@@ -321,12 +369,13 @@
           await new Promise(r=>setTimeout(r,40));
           continue;
         }
-        const j = await r.json(); // { t1,t2,t3, rtt, medianRTT }
+        const j = await r.json(); // { t1,t2,t3, rtt, medianRTT } - server returns t2,t3 names per your timesync API
         const T2 = j.t2, T3 = j.t3;
         const offset = ((T2 - T1) + (T3 - T4)) / 2;
         const delay = (T4 - T1) - (T3 - T2);
         results.push({ offset, delay, T1, T2, T3, T4 });
         appendDebug(`timesync sample ${i}: offset=${offset.toFixed(1)} delay=${delay.toFixed(1)}`);
+        pushTableRow({ role:'timesync_sample', sample:i, offset, delay, T1, T2, T3, T4 });
       } catch (e) {
         console.warn('timesync sample err', e);
         appendDebug(`timesync sample exception: ${e.message}`);
@@ -349,6 +398,7 @@
     if (dbgOffset) dbgOffset.textContent = offsetMs.toFixed(1);
     if (dbgDelay) dbgDelay.textContent = medianDelay.toFixed(1);
     appendDebug(`timesync done: offsetMs=${offsetMs} medianDelay=${medianDelay}`);
+    pushTableRow({ role:'timesync_done', offsetMs, medianDelay });
     return { offset: offsetMs, delay: medianDelay };
   }
 
@@ -384,6 +434,7 @@
     currentLeader = leader;
     if (dbgLeaderStart) dbgLeaderStart.textContent = String(leader.startTime);
     appendDebug(`leader created label=${leader.label} bpm=${leader.bpm} beats=${leader.beatsPerMeasure} start=${leader.startTime}`);
+    pushTableRow({ role:'server_created_leader', label: leader.label, start: leader.startTime, bpm: leader.bpm, beats: leader.beatsPerMeasure });
     return leader;
   }
 
@@ -471,7 +522,20 @@
         // debug
         const now = Date.now();
         const delay = localPlayMs - now;
-        appendDebug(`follower recv beat bn=${msg.beatNumber} serverMs=${serverMs} localPlayMs=${localPlayMs} delay=${delay.toFixed(1)}`);
+        appendDebug(`follower recv beat bn=${msg.beatNumber} serverMs=${Math.round(serverMs)} localPlayMs=${Math.round(localPlayMs)} delay=${delay.toFixed(1)}`);
+
+        // print a console.table and also push a UI row for easy copy/paste
+        const tableRow = {
+          role: 'follower_recv',
+          beatNumber: msg.beatNumber,
+          beatIndex: msg.beatIndex,
+          serverScheduledMs: Math.round(serverMs),
+          localScheduledMs: Math.round(localPlayMs),
+          nowLocalMs: now,
+          diffMs: +(localPlayMs - now).toFixed(2)
+        };
+        try { console.table([tableRow]); } catch(e){}
+        pushTableRow(tableRow);
 
         // *** Resync logic: if incoming beatNumber significantly differs from our nextBeatNumber,
         // adjust nextBeatNumber/nextNoteTime so we don't stay out-of-phase. ***
@@ -489,7 +553,8 @@
             const nextServerMs = serverMs + (noteInterval * 1000);
             const nextLocalMs = nextServerMs - offsetMs;
             nextNoteTime = audioTimeFromLocalEpoch(nextLocalMs);
-            appendDebug(`Resynced: nextServerMs=${nextServerMs} nextLocalMs=${nextLocalMs} nextBeatNumber=${nextBeatNumber}`);
+            appendDebug(`Resynced: nextServerMs=${Math.round(nextServerMs)} nextLocalMs=${Math.round(nextLocalMs)} nextBeatNumber=${nextBeatNumber}`);
+            pushTableRow({ role:'resync', bn, diff, nextServerMs: Math.round(nextServerMs), nextLocalMs: Math.round(nextLocalMs), now: Date.now() });
           }
         }
 
@@ -518,11 +583,13 @@
           offsetMs = Math.round((1 - alpha) * offsetMs + alpha * refined);
           if (dbgOffset) dbgOffset.textContent = offsetMs.toFixed(1);
           if (dbgDelay) dbgDelay.textContent = rtt.toFixed(1);
+          pushTableRow({ role:'dc_pong_refine', offsetMs, rtt });
         } else {
           // fallback smoothing if leaderOff missing
           const alpha = 0.2;
           offsetMs = Math.round((1 - alpha) * offsetMs + alpha * (offsetMs + offsetPeer));
           if (dbgOffset) dbgOffset.textContent = offsetMs.toFixed(1);
+          pushTableRow({ role:'dc_pong_fallback', offsetMs, rtt });
         }
       } else {
         appendDebug('follower DC other: ' + JSON.stringify(msg).slice(0,200));
@@ -538,6 +605,7 @@
       try {
         const t1 = Date.now();
         dc.send(JSON.stringify({ type:'dc_ping', t1 }));
+        pushTableRow({ role:'dc_ping', t1 });
       } catch (e) { console.warn('dc ping fail', e); appendDebug('dc ping fail: ' + e.message); }
     }, 2000);
   }
@@ -551,9 +619,10 @@
     const localStart = Date.now() + 50;
     startSchedulerAtLocalStart(localStart);
     appendDebug('local start pressed');
+    pushTableRow({ role:'ui', action:'local_start', localStart });
   });
 
-  stopLocalBtn.addEventListener('click', () => { stopScheduler(); stopDCPingPong(); appendDebug('local stop pressed'); });
+  stopLocalBtn.addEventListener('click', () => { stopScheduler(); stopDCPingPong(); appendDebug('local stop pressed'); pushTableRow({ role:'ui', action:'local_stop' }); });
 
   startLeaderBtn.addEventListener('click', async () => {
     try {
@@ -577,9 +646,11 @@
       await setupLeaderWebRTC(leader.label);
       setTimeout(refreshLeaderList, 400);
       appendDebug('startLeader done');
+      pushTableRow({ role:'ui', action:'startLeader', label: leader.label, start: leader.startTime });
     } catch (e) {
       console.error('start leader failed', e);
       alert('Start leader failed: ' + (e && e.message));
+      appendDebug('start leader failed: ' + (e && e.message));
     }
   });
 
@@ -610,9 +681,11 @@
       // join WebRTC & start ping/pong
       await joinLeaderWebRTC(leader.label);
       appendDebug(`joined leader ${label}`);
+      pushTableRow({ role:'ui', action:'joined', label });
     } catch (e) {
       console.error('join failed', e);
       alert('Join failed: ' + (e && e.message));
+      appendDebug('join failed: ' + (e && e.message));
     }
   });
 
@@ -646,6 +719,7 @@
     }
     const leader = await r.json();
     appendDebug(`server created leader ${leader.label} start=${leader.startTime}`);
+    pushTableRow({ role:'server_created_leader', label: leader.label, start: leader.startTime, bpm: leader.bpm, beats: leader.beatsPerMeasure });
     return leader;
   }
 
